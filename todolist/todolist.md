@@ -61,11 +61,11 @@ Residual risks: none
 
 ## 全局里程碑
 
-- [ ] M0 工程骨架、配置和公共基础设施可构建
-- [ ] M1 四种单机引擎通过统一一致性测试
-- [ ] M2 三类协议与命令分发可通过 epoll 对外服务
-- [ ] M3 RESP 兼容常用 Redis 客户端和扩展命令
-- [ ] M4 AOF、快照及崩溃恢复可验证
+- [x] M0 工程骨架、配置和公共基础设施可构建
+- [x] M1 四种单机引擎通过统一一致性测试
+- [x] M2 三类协议与命令分发可通过 epoll 对外服务
+- [x] M3 RESP 兼容常用 Redis 客户端和扩展命令
+- [x] M4 AOF、快照及崩溃恢复可验证
 - [ ] M5 primary/replica 全量与增量复制可验证
 - [ ] M6 KVCache 分级、匹配和请求合并可验证
 - [ ] M7 vLLM/SGLang 至少各完成一个可运行集成路径
@@ -311,59 +311,62 @@ Residual risks: none
 
 ## P2：命令编排、协议与 epoll 服务
 
-### [~] P2.1 统一命令模型与分发
+### [x] P2.1 统一命令模型与分发
 
-- [ ] 定义 typed command/request context/response，协议层不直接访问引擎
-- [ ] 实现命令注册与分发，避免协议间复制业务逻辑
-- [ ] 实现 `SET/GET/DEL/MOD/EXIST/SAVE/LOAD`
-- [ ] 将引擎错误稳定映射到各协议响应
-- [ ] 加入请求 deadline、取消、最大在途请求和背压
-- [ ] 为每个命令增加协议无关单元测试
+- [x] 定义 typed command/request context/response，协议层不直接访问引擎
+- [x] 实现命令注册与分发，避免协议间复制业务逻辑
+- [x] 实现 `SET/GET/DEL/MOD/EXIST/SAVE/LOAD`
+- [x] 将引擎错误稳定映射到各协议响应
+- [x] 加入请求 deadline、取消、最大在途请求和背压
+- [x] 为每个命令增加协议无关单元测试
 
 验收：同一命令通过不同协议得到等价结果；未知命令和参数错误不会关闭健康连接。
 
-### [~] P2.2 Text + KV 协议
+### [x] P2.2 Text + KV 协议
 
-- [ ] 冻结 framing，支持二进制 value，不能依赖换行承载任意 payload
-- [ ] 实现增量 parser，处理分片、粘包和单连接多命令
-- [ ] 实现 encoder、错误响应和协议版本
-- [ ] 增加畸形长度、超限、提前 EOF 和 fuzz 测试
+- [x] 冻结 framing，支持二进制 value，不能依赖换行承载任意 payload
+- [x] 实现增量 parser，处理分片、粘包和单连接多命令
+- [x] 实现 encoder、错误响应和协议版本
+- [x] 增加畸形长度、超限、提前 EOF 和 fuzz 测试
 
-### [~] P2.3 Batch 协议
+### [x] P2.3 Batch 协议
 
-- [ ] 定义 batch header、record count、总长度、每项状态和最大限制
-- [ ] 明确 batch 是逐项原子还是整体原子，并实现对应行为
-- [ ] 支持混合读写及保持响应顺序
-- [ ] 对超大 batch、部分失败和背压增加测试
+- [x] 定义 batch header、record count、总长度、每项状态和最大限制
+- [x] 明确 batch 是逐项原子还是整体原子，并实现对应行为
+- [x] 支持混合读写及保持响应顺序
+- [x] 对超大 batch、部分失败和背压增加测试
 
-### [~] P2.4 epoll 网络后端
+### [x] P2.4 epoll 网络后端
 
-- [ ] 定义 `INetworkBackend` 与 connection state 生命周期
-- [ ] 实现 nonblocking accept/read/write、边沿触发 drain 和 partial write
-- [ ] 实现 per-connection input/output 高水位与读暂停
-- [ ] 实现连接空闲、握手、请求和关闭超时
-- [ ] 实现 signal 驱动的优雅停机和在途请求排空
-- [ ] 测试慢客户端、断连、半关闭、fd 复用和连接风暴
+- [x] 定义 `INetworkBackend` 与 connection state 生命周期
+- [x] 实现 nonblocking accept/read/write、边沿触发 drain 和 partial write
+- [x] 实现 per-connection input/output 高水位与读暂停
+- [x] 实现连接空闲、握手、请求和关闭超时
+- [x] 实现 signal 驱动的优雅停机和在途请求排空
+- [x] 测试慢客户端、断连、半关闭、fd 复用和连接风暴
 
 验收：epoll 后端可在同一端口识别已启用协议并稳定服务；无 busy loop、无未界定 buffer 增长。
 
-### [~] P2.5 Server 装配
+### [x] P2.5 Server 装配
 
-- [ ] 从 `config/config.json` 创建引擎、协议、网络、持久化和复制组件
-- [ ] 启动阶段失败执行逆序清理并返回非零状态
-- [ ] 增加 readiness/liveness 内部状态
-- [ ] 实现端到端 smoke test：启动、CRUD、停机、重启
+- [x] 从 `config/config.json` 创建引擎、协议、网络、持久化和复制组件
+- [x] 启动阶段失败执行逆序清理并返回非零状态
+- [x] 增加 readiness/liveness 内部状态
+- [x] 实现端到端 smoke test：启动、CRUD、停机、重启
 
 工作记录：
 ```text
 Task IDs: P2.1, P2.2, P2.3, P2.4, P2.5
 Owner: Agent A
 Dependencies: P1.1, P1.6, P0.4
-Scope: typed command dispatcher, native Text/KV + Batch, epoll backend and server assembly
+Scope: 本轮修复 typed command dispatcher 事务边界、多协议语义、Batch frame 身份、epoll 连接生命周期/背压/超时/协议门控，以及 server readiness 与同步 SAVE/LOAD 装配
+Implementation decisions: Batch 逐项原子并保持响应顺序；epoll 增加配置化 input/output 水位、空闲/握手/优雅停机超时；协议探测支持分片且严格遵循 enabled；Redis CLIENT 状态保存在连接会话
+Current scope after audit convergence: 补齐 RequestContext/deadline/cancel、INetworkBackend、未知命令健康连接、Native/Batch 边界测试、真实 epoll socket 生命周期及进程级 restart smoke
+Progress evidence: RequestContext/connection IDs、INetworkBackend、server lifecycle state、typed unknown command errors、Native/Batch boundary tests and real TCP fixture added; process restart smoke and fuzz remain pending
 Condition evidence: command dispatcher; RESP/native/Batch incremental parsers; epoll edge-triggered accept/read/write and live RESP SET/GET smoke
 Changed files: include/kvstore/command/, include/kvstore/protocol/, include/kvstore/net/, src/command/, src/protocol/, src/net/, src/server/main.cpp, tests/unit/protocol_test.cpp
-Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure; live socket smoke on port 6399
-Test result: Debug 40/40 pass; protocol/persistence focused 9/9 pass; live RESP SET/GET pass
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure; cmake --build build --target format-check; real TCP ServerFixture tests; redis-py/Node redis/go-redis smoke clients
+Test result: Debug 55/55 pass; ASAN/UBSAN/TSAN setarch matrix previously 45/45; ServerFixture 4/4; redis-py 6.4.0, Node redis 6.2.1, go-redis 9.7.0 smoke pass; redis-cli unavailable via local package runtime
 Audit round: 1
 Auditor: Agent B
 Verdict: fail
@@ -390,36 +393,50 @@ Verdict: fail
 Findings: Dispatcher/AOF failure原子性与恢复 event_id；epoll output backpressure、协议探测/配置 gating、timeout/drain；Batch frame 对应；Redis 多 key/CLIENT 语义仍不满足
 Commands: Debug/ASAN+UBSAN/TSAN 40/40；format-check；focused 9/9
 Residual risks: P2 全部任务保持 [~]，不得标记完成
+
+Audit round: 21
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P2.1/P2.3/P2.5 实现验收通过；P2.2 缺实际 libFuzzer 运行；P2.4 缺慢客户端、fd 复用和 shutdown 后零 dispatch 专项回归
+Commands: Debug 73/73；ASAN/UBSAN 73/73；TSAN setarch 73/73；format-check；git diff --check；真实 TCP fixture
+Residual risks: P2.2/P3.1/P10.1 fuzz（Owner: Agent A）；P2.4/P10.1 socket 压力与生命周期专项测试（Owner: Agent A）
+
+Audit round: 22
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P2.1-P2.5 全部验收通过；无 critical/high；慢读测试未确定性触发内核 EAGAIN/partial-write，转 P10.1
+Commands: Debug 77/77；ASAN/UBSAN 77/77；TSAN setarch 77/77；Clang 18 libFuzzer 10,000 runs；socket 专项 repeat 20；format-check；git diff --check
+Residual risks: P2.4/P10.1，Owner: Agent A；增加受控小 SO_SNDBUF、确定性 EAGAIN/partial-write 回归
 ```
 
 ---
 
 ## P3：Redis RESP 兼容层
 
-### [~] P3.1 RESP parser/encoder
+### [x] P3.1 RESP parser/encoder
 
-- [ ] 支持 RESP2 Simple String、Error、Integer、Bulk String、Array 和 Null
-- [ ] 评估 RESP3；首版不实现时明确拒绝/协商行为
-- [ ] 实现增量、多命令 pipeline、嵌套深度和 frame 上限
-- [ ] 保持 key/value 二进制安全
-- [ ] 增加 redis-protocol corpus、fuzz 和恶意长度测试
+- [x] 支持 RESP2 Simple String、Error、Integer、Bulk String、Array 和 Null
+- [x] 评估 RESP3；首版不实现时明确拒绝/协商行为
+- [x] 实现增量、多命令 pipeline、嵌套深度和 frame 上限
+- [x] 保持 key/value 二进制安全
+- [x] 增加 redis-protocol corpus、fuzz 和恶意长度测试
 
-### [~] P3.2 Redis 命令
+### [x] P3.2 Redis 命令
 
-- [ ] `SET` 使用原子 upsert，已存在 key 不通过竞态的 EXIST+MOD 实现
-- [ ] 实现 `GET/DEL/EXISTS/MGET`
-- [ ] 实现原子 `INCR/DECR`、非整数和溢出错误
-- [ ] 实现 `PING [message]`、`ECHO message`
-- [ ] 实现最小 `CLIENT SETINFO/SETNAME/GETNAME` 探测兼容
-- [ ] 实现最小 `INFO` sections，未支持命令返回标准错误
-- [ ] 决定并记录 `SAVE/LOAD` 在 RESP 层的暴露方式
-- [ ] 增加 pipeline、并发覆盖、MGET Null 和客户端探测测试
+- [x] `SET` 使用原子 upsert，已存在 key 不通过竞态的 EXIST+MOD 实现
+- [x] 实现 `GET/DEL/EXISTS/MGET`
+- [x] 实现原子 `INCR/DECR`、非整数和溢出错误
+- [x] 实现 `PING [message]`、`ECHO message`
+- [x] 实现最小 `CLIENT SETINFO/SETNAME/GETNAME` 探测兼容
+- [x] 实现最小 `INFO` sections，未支持命令返回标准错误
+- [x] 决定并记录 `SAVE/LOAD` 在 RESP 层的暴露方式
+- [x] 增加 pipeline、并发覆盖、MGET Null 和客户端探测测试
 
-### [~] P3.3 客户端兼容验证
+### [x] P3.3 客户端兼容验证
 
-- [ ] 使用 `redis-cli` 完成 CRUD、pipeline 和 INFO smoke test
-- [ ] 使用至少 Python redis-py、Node redis、Go go-redis 验证连接探测
-- [ ] 记录不兼容命令和版本边界
+- [x] 使用 `redis-cli` 完成 CRUD、pipeline 和 INFO smoke test
+- [x] 使用至少 Python redis-py、Node redis、Go go-redis 验证连接探测
+- [x] 记录不兼容命令和版本边界
 
 验收：常见客户端无需关闭健康检查即可连接；覆盖写和计数命令在线性化测试中正确。
 
@@ -429,10 +446,12 @@ Task IDs: P3.1, P3.2, P3.3
 Owner: Agent A
 Dependencies: P2.1, P2.4, P2.5, P1.1
 Scope: RESP2 incremental parser/encoder and Redis command compatibility
+Current scope after audit convergence: 修正 Redis arity/INFO/CLIENT/HELLO/SAVE 暴露，补多 key/MGET/计数/探测测试并运行可用客户端矩阵
+Progress evidence: INCRBY/DECRBY, Redis arity, INFO sections, typed unknown/HELLO errors, native management commands, binary/limit tests, real TCP session tests, fixed-version client smoke scripts and docs/redis-compatibility.md added
 Condition evidence: RESP2 bulk/array/null/error, pipeline/fragmentation, atomic Redis SET overwrite, MGET Null, INCR/DECR, PING/ECHO/INFO
 Changed files: include/kvstore/protocol/resp.hpp, src/protocol/resp.cpp, src/command/dispatcher.cpp, tests/unit/protocol_test.cpp
 Commands: ctest --test-dir build --output-on-failure -R ProtocolTest
-Test result: focused protocol tests pass; redis-cli/client-library compatibility pending
+Test result: ProtocolTest 14/14 pass; client smoke matrix pass for redis-py 6.4.0, Node redis 6.2.1, go-redis 9.7.0; local redis-cli unavailable
 Audit round: 1
 Auditor: Agent B
 Verdict: fail
@@ -459,50 +478,64 @@ Verdict: fail
 Findings: initial RESP SET/GET/DEL/type defects fixed and regression tests added; redis-cli/client-library matrix and malformed-prefix behavior remain pending
 Commands: Debug focused protocol tests pass
 Residual risks: P3.3 external client compatibility pending
+
+Audit round: 21
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P3.2/P3.3 实现验收通过；P3.1 仅因 Clang/libFuzzer 在当前环境不可用保持未完成
+Commands: ProtocolTest；ServerFixture；redis-cli 6.0.16、redis-py 6.4.0、Node redis 6.2.1、go-redis 9.7.0 实际 smoke
+Residual risks: P3.1/P10.1 fuzz target 待具备 Clang/libFuzzer 的环境执行（Owner: Agent A）
+
+Audit round: 22
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P3.1-P3.3 全部验收通过；无 critical/high
+Commands: Clang 18/compiler-rt protocol_fuzz 10,000 runs；redis-cli 6.0.16、redis-py 6.4.0、Node redis 6.2.1、go-redis 9.7.0；Debug/ASAN/TSAN 77/77
+Residual risks: P10.1 继续扩大协议 fuzz corpus 与运行时长（Owner: Agent A）
 ```
 
 ---
 
 ## P4：统一写事件、AOF 与快照
 
-### [~] P4.1 写事件中心
+### [x] P4.1 写事件中心
 
-- [ ] 定义 `WriteEvent`：offset、event ID、origin node/source、command、key/value、时间和 checksum
-- [ ] 区分 `client/aof_replay/full_sync/incremental_sync` 来源
-- [ ] 明确事件提交点、存储可见点、AOF 确认点和复制发布点
-- [ ] 实现有界队列、背压和停机 drain
-- [ ] 实现传播策略，阻止回放重入 AOF 和同步回环
-- [ ] 测试并发生产顺序、重复事件、消费者失败和队列满
+- [x] 定义 `WriteEvent`：offset、event ID、origin node/source、command、key/value、时间和 checksum
+- [x] 区分 `client/aof_replay/full_sync/incremental_sync` 来源
+- [x] 明确事件提交点、存储可见点、AOF 确认点和复制发布点
+- [x] 实现有界队列、背压和停机 drain
+- [x] 实现传播策略，阻止回放重入 AOF 和同步回环
+- [x] 测试并发生产顺序、重复事件、消费者失败和队列满
 
 验收：所有变更命令恰好形成一个逻辑事件；offset 严格递增且恢复后不回退。
 
-### [~] P4.2 AOF 格式与批处理
+### [x] P4.2 AOF 格式与批处理
 
-- [ ] 冻结版本化 AOF record/frame 格式和 CRC
-- [ ] 按记录数、累计字节、时间任一阈值触发 flush
-- [ ] 独立实现 `always/everysec/no` sync 策略及错误上报
-- [ ] 处理 partial write、EINTR、ENOSPC、损坏尾记录和目录 fsync
-- [ ] 实现 replay，来源标记为 `aof_replay`
-- [ ] 实现 rewrite/compaction 或登记明确容量边界
-- [ ] 增加 kill -9、截断、bit flip、重复 replay 和磁盘满测试
+- [x] 冻结版本化 AOF record/frame 格式和 CRC
+- [x] 按记录数、累计字节、时间任一阈值触发 flush
+- [x] 独立实现 `always/everysec/no` sync 策略及错误上报
+- [x] 处理 partial write、EINTR、ENOSPC、损坏尾记录和目录 fsync
+- [x] 实现 replay，来源标记为 `aof_replay`
+- [x] 实现 rewrite/compaction 或登记明确容量边界
+- [x] 增加 kill -9、截断、bit flip、重复 replay 和磁盘满测试
 
-### [~] P4.3 Snapshot
+### [x] P4.3 Snapshot
 
-- [ ] 定义 header：magic、version、flags、count、payload length、last offset、CRC32
-- [ ] 定义确定性 record 编码，不直接 dump C++ struct 内存布局
-- [ ] 使用临时文件、fsync 和原子 rename 发布快照
-- [ ] 实现 mmap 加载，并校验文件长度、边界、count 和 checksum
-- [ ] 实现 io_uring snapshot writer，保留同步 fallback 的明确选择配置
-- [ ] `SAVE/LOAD` 与后台任务并发时有清晰互斥/快照点语义
-- [ ] 测试空库、大对象、损坏 header、版本不兼容和中断发布
+- [x] 定义 header：magic、version、flags、count、payload length、last offset、CRC32
+- [x] 定义确定性 record 编码，不直接 dump C++ struct 内存布局
+- [x] 使用临时文件、fsync 和原子 rename 发布快照
+- [x] 实现 mmap 加载，并校验文件长度、边界、count 和 checksum
+- [x] 实现 io_uring snapshot writer，保留同步 fallback 的明确选择配置
+- [x] `SAVE/LOAD` 与后台任务并发时有清晰互斥/快照点语义
+- [x] 测试空库、大对象、损坏 header、版本不兼容和中断发布
 
-### [~] P4.4 恢复流程
+### [x] P4.4 恢复流程
 
-- [ ] 启动时加载最新合法 snapshot 后回放更高 offset 的 AOF
-- [ ] 拒绝 offset 回退、重复或不连续记录，或按文档化策略处理
-- [ ] 暴露恢复阶段、进度、耗时和失败原因
-- [ ] 恢复期间 readiness 为 false，不接受普通写请求
-- [ ] 建立不同崩溃点的恢复矩阵测试
+- [x] 启动时加载最新合法 snapshot 后回放更高 offset 的 AOF
+- [x] 拒绝 offset 回退、重复或不连续记录，或按文档化策略处理
+- [x] 暴露恢复阶段、进度、耗时和失败原因
+- [x] 恢复期间 readiness 为 false，不接受普通写请求
+- [x] 建立不同崩溃点的恢复矩阵测试
 
 验收：确认成功的写在配置承诺范围内可恢复；损坏数据不会静默加载；恢复结果与参考模型一致。
 
@@ -511,7 +544,9 @@ Residual risks: P3.3 external client compatibility pending
 Task IDs: P4.1, P4.2, P4.3, P4.4
 Owner: Agent A
 Dependencies: P1.1, P0.3, P0.4
-Scope: write events, versioned AOF, CRC snapshot, mmap load and restart recovery
+Scope: 本轮重做统一写事件提交/失败回滚、二进制版本化 AOF frame、显式 snapshot header/mmap load，以及严格 offset/event_id 恢复
+Implementation decisions: AOF 使用二进制 AOF1 frame；snapshot header 包含 flags/count/payload length/last offset/last event ID/CRC；io_uring writer 配置启用时优先使用，能力不足时按配置允许同步 fallback；损坏尾记录、回退、重复和断档一律拒绝
+Current scope after audit convergence: 补 WriteEvent checksum/origin、有界事件消费与 drain、AOF sync/failure matrix、snapshot 边界/发布测试、恢复状态和 restart reference-model matrix
 Condition evidence: WriteEvent offset/source, AOF AOF1+CRC+fdatasync/replay, snapshot magic/version/count/CRC/atomic rename, startup restore
 Changed files: include/kvstore/persistence/, src/persistence/, src/server/main.cpp, tests/unit/persistence_test.cpp
 Commands: ctest --test-dir build --output-on-failure -R PersistenceTest; live restart smoke pending rerun
@@ -542,6 +577,104 @@ Verdict: fail
 Findings: sink failure事务边界、event_id replay、AOF partial write rollback/size limit、snapshot完整header与crash矩阵仍未完成
 Commands: PersistenceTest focused suite pass；ASAN/UBSAN/TSAN 40/40
 Residual risks: P4 全部任务保持 [~]
+
+Audit round: 4
+Auditor: Agent B
+Verdict: fail
+Findings: high dispatcher 多 key DEL 部分提交；high AOF fdatasync 失败残留与恶意长度分配；high epoll 超时/背压/停机 drain；medium snapshot-AOF gap、CLIENT 状态和配置约束；缺少故障注入与 socket 回归
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure (40/40); git diff --check
+Residual risks: 已修复大部分代码路径，批量事件事务与自动化故障/socket 测试待 round 5
+
+Audit round: 5
+Auditor: Agent B
+Verdict: fail
+Findings: high src/command/dispatcher.cpp:108 多 key DEL 在第 N 个事件 sink 成功后后续 sink 失败时，已发布事件无法回滚；high src/net/epoll_server.cpp:103 停机 drain 仍可能接收并执行新请求；high src/net/epoll_server.cpp:215 单次 pipeline 在水位检查前可执行大量命令；medium partial frame parse timeout 状态不准确；medium CLIENT 子命令状态注入大小写；medium src/persistence/aof.cpp:108 ftruncate 失败处理缺少 durability 证明；缺少对应自动化回归
+Commands: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON; cmake --build build -j2; ctest --test-dir build --output-on-failure (40/40); focused ProtocolTest/PersistenceTest (9/9); git diff --check
+Residual risks: P2-P4 保持 [~]；下一轮扩展 EventSink 批量提交接口并增加故障注入、真实 socket、TSAN/ASAN 回归
+
+Audit round: 6
+Auditor: Agent B
+Verdict: fail
+Findings: high epoll 在 max_inflight_requests 截断后静默丢弃已解析命令；high Batch 粘连 frame 被单帧 max_frame 限制；high 多 key DEL 引擎中途失败不回滚；high AOF partial write 回滚结果未验证；medium AOF Append 未验证跨调用连续性；medium partial frame parse timeout 状态错误；medium input buffer 限制未覆盖 parser/pipeline；medium listen address 格式未在配置阶段校验
+Commands: Debug/ASAN/UBSAN/TSAN build and ctest; focused protocol/persistence tests; git diff --check
+Residual risks: 已修复主要代码路径；需 round 7 复核 pending queue、Batch 累积上限、AOF rollback/durability 和 socket 故障注入
+
+Audit round: 7
+Auditor: Agent B
+Verdict: fail
+Findings: critical AOF sync/rollback failure仍可能留下已提交 frame；high malformed RESP/native 访问失败 Result value 导致事件循环异常；high pending queue 在仅 EPOLLOUT 时无 drain；high graceful shutdown 不排空 pending；high Batch 处理仍可能超过输出上限后丢响应；high 多 key DEL rollback 与外部 batch sink 原子性未证明；medium Batch 及 parser 输入上限/事件 ID 连续性；format-check 未通过
+Commands: Debug/ASAN/UBSAN/TSAN build；ctest 40/40；focused protocol/persistence；git diff --check；format-check failed
+Residual risks: P2/P3/P4 继续保持 [~]；需要独立修复 AOF durability、epoll pending drain/shutdown、Batch 输出事务和故障注入回归
+
+Audit round: 8
+Auditor: Agent B
+Verdict: fail
+Findings: critical AOF write/sync/truncate 失败后不能证明残留 frame 不可恢复；high Batch 单 frame 超过 max_inflight_requests 时丢余下命令；high pending queue 无连接级总量上限；high Batch 累积与输出编码可绕过内存/输出水位；high 多 key DEL fallback sink 仍非原子；high AOF 总记录大小检查下溢；medium 输入上限减法下溢、snapshot 边界 event_id 对应关系、metrics/upstream 地址校验、超大 timeout；format-check 失败；缺少真实 socket/故障注入回归
+Commands: Debug build+ctest 40/40; ASAN/UBSAN build+ctest 40/40; TSAN build pass, ctest discovery blocked by environment mapping; focused Protocol/Persistence/Cli 11/11; format-check failed; git diff --check
+Residual risks: P2/P3/P4 保持 [~]；需要先闭环 AOF 提交协议、pending/Batch 有界调度和故障注入测试，再请求下一轮审计
+
+Audit round: 9
+Auditor: Agent B
+Verdict: fail
+Findings: critical AOF sync_policy=no 下 Append/Flush 可能留下 flags=0 frame 而 replay 强制 flags=1；high Batch sink 无事务 prepare/commit/rollback 契约；high Batch/RESP 达到 max_inflight 后仍存在消费后丢弃；high shutdown 只做一次 pending drain；high AOF commit sync 失败仍依赖 truncate；high snapshot 与 AOF 长度边界校验不足；medium writer 重启未初始化末尾 offset/event_id；medium snapshot 资源上限、metrics/upstream 地址和 timeout 范围不足；缺少故障/socket 测试
+Commands: Debug build+ctest 40/40; ASAN/UBSAN build+ctest 40/40; TSAN discovery/binary blocked by environment mapping; focused tests 11/11; format-check passed; git diff --check passed
+Residual risks: P2/P3/P4 保持 [~]；下一轮必须先完成 AOF committed/no-sync 语义、严格有界 pending/Batch 调度、shutdown 循环 drain 和恢复边界矩阵
+
+Audit round: 11
+Auditor: Agent B
+Verdict: fail
+Findings: critical AOF marker/crash and batch atomicity; critical no/everysec sync semantics; high AOF rollback durability; high pending queue byte bounds and output budget; high BatchEventSink no transaction contract; medium persistence/network flags silently ignored; medium snapshot/AOF boundary; medium malformed connection lifecycle; format-check failure in aof.hpp
+Commands: Debug/ASAN/UBSAN/TSAN build and ctest; TSAN setarch ctest 40/40; focused 20/20; format-check failed; git diff --check passed
+Residual risks: P2/P3/P4 remain [~]; next scope is transactional AOF envelope, bounded output/pending, explicit unsupported configuration rejection, malformed socket closure and failure-injection coverage
+
+Audit round: 12
+Auditor: Agent B
+Verdict: fail
+Findings: critical epoll probe temporary string_view UAF；critical AOF 逐 marker 无 batch crash atomicity；high marker/rollback durability；high everysec 无 idle timer；high output budget检查晚；high pending queue按命令而非字节且高水位时反向保留 EPOLLIN；high malformed parser连接未进入terminal；high online LOAD复活旧AOF状态；medium多项配置开关静默忽略
+Commands: Debug/ASAN/UBSAN 40/40; TSAN environment mapping failure with setarch direct pass; format-check pass; git diff --check pass
+Residual risks: 已修复 UAF、错误连接 terminal 标记和 LOAD 拒绝；其余风险进入 round 13
+
+Audit round: 13
+Auditor: Agent B
+Verdict: fail
+Findings: critical AOF batch/crash atomicity；critical AOF rollback durability；high everysec 无后台定时 flush且阈值失效；high Batch 输出预算仍可导致执行后丢响应；high高水位且 pending 时仍启用 EPOLLIN；high multi-key DEL sink无事务契约；medium配置开关/恢复边界/真实 socket 与故障注入覆盖不足
+Commands: Debug/ASAN/UBSAN 40/40; TSAN discovery blocked by environment and setarch ctest 40/40; format-check pass; git diff --check pass
+Residual risks: P2/P3/P4 保持 [~]；下一轮必须完成事务 envelope、durability failure state、字节级 admission/backpressure、完整配置拒绝策略与真实 socket/故障矩阵
+
+Audit round: 14-16
+Auditor: Agent B
+Verdict: fail
+Findings: 事务 AOF 未提交尾恢复、uncertain commit、snapshot event boundary、无 sink 序列推进、截断 header ASAN 越界，以及 pending admission 先入队后拒绝；均在 round 17 前修复
+Commands: Debug/ASAN/UBSAN/TSAN 逐轮 build+ctest；format-check；git diff --check
+Residual risks: round 17 前仅剩真实 socket admission/terminal-close 自动化覆盖
+
+Audit round: 17
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: medium tests/unit/protocol_test.cpp:96 缺少真实 epoll socket 回归，尚未自动验证 pending 参数字节超限时不入队、不 dispatch、返回 BUSY 后 EOF；静态审查未发现 critical/high
+Commands: Debug 45/45；ASAN/UBSAN 45/45；TSAN setarch 45/45；format-check pass；git diff --check pass
+Residual risks: P2.4/P10.1，Owner: Agent A；补充 RESP/Native/Batch 真实 socket admission/terminal-close 测试，断言超限请求 dispatch 次数为零
+
+Audit round: 18-20
+Auditor: Agent B
+Verdict: fail
+Findings: response budget 误拒绝、AOF 尾事务恢复、flush 阈值、queue deadline、跨协议限额、Native missing 状态、input 减法下溢及 multi-key DEL sink 原子性；均在 round 21 前修复
+Commands: 每轮 Debug/ASAN/UBSAN/TSAN build+ctest；format-check；git diff --check
+Residual risks: 修复后进入 round 21
+
+Audit round: 21
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P4.1/P4.2/P4.4 实现验收通过；P4.3 同步 snapshot 完成，io_uring writer 尚未实现，仅提供显式同步 fallback
+Commands: Debug 73/73；ASAN/UBSAN 73/73；TSAN setarch 73/73；format-check pass；git diff --check pass
+Residual risks: P4.3，Owner: Agent A；实现并验证 io_uring snapshot writer；P2.4/P10.1 补专项 socket 压力矩阵；P2.2/P3.1/P10.1 在 Clang 环境运行 fuzz
+
+Audit round: 22
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: P4.1-P4.4 全部验收通过；无 critical/high；io_uring direct 与 fallback 能力测试通过，fallback 诊断措辞为非阻塞 low
+Commands: Debug 77/77；ASAN/UBSAN 77/77；TSAN setarch 77/77；io_uring capability/fallback repeat 10；format-check；git diff --check
+Residual risks: P9.3，Owner: Agent A；仅在实际 capability probe 失败并发生 fallback 时输出 unavailable 诊断
 ```
 
 ---
@@ -623,27 +756,27 @@ Residual risks: P4 全部任务保持 [~]
 
 ## P7：Attention KVCache 模型与分级存储
 
-### [ ] P7.1 KVCache 数据与 key 规范
+### [x] P7.1 KVCache 数据与 key 规范
 
-- [ ] 定义 tensor manifest：model/adapter/tenant/token hash/layer/dtype/shape/layout/device
-- [ ] 定义 chunk 大小、对齐、压缩可选项和每 chunk checksum
-- [ ] 定义模型升级、adapter 变化和 tokenizer 变化的失效规则
-- [ ] 实现 canonical cache key，防止跨模型/租户错误命中
-- [ ] 实现 metadata 与 chunk 生命周期的原子关联
-- [ ] 增加 key 碰撞、元数据不兼容和损坏 chunk 测试
+- [x] 定义 tensor manifest：model/adapter/tenant/token hash/layer/dtype/shape/layout/device
+- [x] 定义 chunk 大小、对齐、压缩可选项和每 chunk checksum
+- [x] 定义模型升级、adapter 变化和 tokenizer 变化的失效规则
+- [x] 实现 canonical cache key，防止跨模型/租户错误命中
+- [x] 实现 metadata 与 chunk 生命周期的原子关联
+- [x] 增加 key 碰撞、元数据不兼容和损坏 chunk 测试
 
 验收：任意命中都能证明张量兼容；不完整对象不可见；删除可回收所有关联 chunk。
 
-### [ ] P7.2 Match 与索引
+### [x] P7.2 Match 与索引
 
-- [ ] 实现 exact match
-- [ ] 实现 token/prefix hash 的最长前缀 match
-- [ ] 返回命中 token 数、命中层/块和缺失范围
-- [ ] 处理 hash 碰撞，可用 token 摘要/二次校验确认
-- [ ] 为索引更新、驱逐和并发查询定义一致性
-- [ ] benchmark 不同 prefix 长度、并发度和对象规模
+- [x] 实现 exact match
+- [x] 实现 token/prefix hash 的最长前缀 match
+- [x] 返回命中 token 数、命中层/块和缺失范围
+- [x] 处理 hash 碰撞，可用 token 摘要/二次校验确认
+- [x] 为索引更新、驱逐和并发查询定义一致性
+- [x] benchmark 不同 prefix 长度、并发度和对象规模
 
-### [ ] P7.3 内存/磁盘分级状态机
+### [~] P7.3 内存/磁盘分级状态机
 
 - [ ] 定义 resident/loading/evicting/disk-only/failed 状态与合法转换
 - [ ] 实现内存 slab/pool、预算、碎片统计和高低水位
@@ -653,15 +786,15 @@ Residual risks: P4 全部任务保持 [~]
 - [ ] 迁移期间 pin 活跃对象，防止 use-after-free 或重复驱逐
 - [ ] 对磁盘满、短读、checksum 错误、取消和进程重启增加测试
 
-### [ ] P7.4 决策与调度
+### [~] P7.4 决策与调度
 
-- [ ] 收集 recency、frequency、size、load cost、recompute cost 和 reuse distance
-- [ ] 建立可解释准入分数，首版基线可采用 cost-aware LRU/GDSF
-- [ ] 区分 prefill 热对象、decode 活跃对象和低复用对象
-- [ ] 调度 load/match/evict 队列，设置并发度、优先级和 I/O 配额
-- [ ] 在 deadline 前预计无法加载时快速 miss 并允许推理端重算
-- [ ] 防止大对象扫描、cache pollution 和 tenant 饥饿
-- [ ] 支持策略参数配置和运行指标，不在线上热路径同步训练策略
+- [~] 收集 recency、frequency、size、load cost、recompute cost 和 reuse distance
+- [~] 建立可解释准入分数，首版基线可采用 cost-aware LRU/GDSF
+- [~] 区分 prefill 热对象、decode 活跃对象和低复用对象
+- [~] 调度 load/match/evict 队列，设置并发度、优先级和 I/O 配额
+- [~] 在 deadline 前预计无法加载时快速 miss 并允许推理端重算
+- [~] 防止大对象扫描、cache pollution 和 tenant 饥饿
+- [~] 支持策略参数配置和运行指标，不在线上热路径同步训练策略
 
 验收：策略决策可由指标解释；在基准 trace 上优于纯 LRU 基线，且尾延迟无不可接受回归。
 
@@ -675,7 +808,129 @@ Residual risks: P4 全部任务保持 [~]
 
 验收：resident hit 不触发磁盘 I/O；并发相同请求只产生一次 load；handle 生命周期覆盖推理消费。
 
-工作记录：待开始时填写。
+工作记录：
+
+```text
+Task ID: P7.1
+Owner: Agent A
+Dependencies: P0.1, P1.1
+Scope: 定义版本化 tensor manifest 与 canonical key，建立独立 resident chunk pool，并实现 metadata/chunk 原子发布和回收
+Implementation decisions: KVCacheService 独立于 IEngine 的 owned-copy API；canonical 编码使用版本化长度前缀二进制格式和 SHA-256，chunk 使用 CRC32；首版磁盘层采用目录分片的不可变内容寻址文件；压缩首版为 none 并保留版本化枚举
+Downstream decisions: P7.4 实现 LRU 基线与 GDSF 默认策略、priority/deadline 队列及 tenant DRR；P8.1 使用 Protobuf+UDS 和 pinned CPU staging；vLLM 0.29.0 使用 KVConnectorBase_V1，SGLang 0.5.19 使用 dynamic HiCacheStorage interface_v1；Qwen2.5-0.5B 固定 revision 作为共同基准
+Condition evidence: TensorManifest 覆盖 model/adapter/tenant/token/layer/dtype/shape/axis/stride/layout/packing/cache ABI/device/topology/timestamp/checksum；KVC1 canonical 编码和 SHA-256 key；64-byte 对齐、CRC32 chunk、整对象 SHA-256；有硬计数/逻辑尺寸限额及保守内存准入估算的 reserve/put/commit/abort/delete 与 shared resident handle；19 项 golden/collision/quota/layout/不兼容/损坏/并发生命周期测试
+Changed files: CMakeLists.txt, include/kvstore/kvcache/model.hpp, include/kvstore/kvcache/chunk_registry.hpp, src/kvcache/model.cpp, src/kvcache/chunk_registry.cpp, tests/unit/kvcache_model_test.cpp, docs/kvcache-format.md, todolist/todolist.md
+Commands: cmake Debug configure/build；ctest Debug 94/94；ASAN+UBSAN full 87/87 及 focused 19/19；TSAN setarch full 87/87 及 focused 19/19；format-check；git diff --check
+Test result: Debug 94/94 pass；ASAN+UBSAN focused 19/19 pass；TSAN focused 19/19 pass；此前 sanitizer full 87/87 pass；format-check 和 git diff --check pass
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: high Lookup 仅凭 CacheKey 无法二次确认 manifest；high reservation/object 缺少 chunk/byte/count 硬上限；high layout 缺轴顺序/stride/KV packing/format ABI；medium handle 空值/越界错误模型不安全；medium 并发竞态、lookup collision 与 quota 测试不足；medium 缺完整 wire 顺序/枚举和 golden vector
+Commands: Debug/ASAN+UBSAN/TSAN focused 各 10/10；format-check；git diff --check；实际 diff/API/docs 审查
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 2
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: high max_objects 可由多个 pending 后依次 commit 绕过；high 部分分配/KeyFunction 异常可穿透 Status API；medium layout/packing 与轴位置语义未约束；medium tracked budget 未包含 metadata/bookkeeping；medium 缺 commit/abort、quota 并发和失败路径测试
+Commands: Debug/ASAN+UBSAN/TSAN focused 各 15/15；并发测试 repeat 100；format-check；git diff --check；独立 canonical encoder 校验 golden key
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 3
+Audit round: 3
+Auditor: Agent B
+Verdict: fail
+Findings: high 新增 P7 文件未 stage，审计以 clean git archive 无法复现（仓库流程未要求实现阶段修改 staging，四审按工作区产物复核）；medium tracked estimate 未充分计入动态 manifest/allocator 开销；medium 声称 block-major 满块被拒绝；low 缺 block-major 和 allocation rollback 回归
+Commands: Debug full 95/95；focused Debug/ASAN+UBSAN/TSAN 各 18/18；并发 repeat 100；format-check；git diff --check；clean committed-tree archive configure
+Residual risks: tracked estimate 已扩大且文档明确物理预算归 P7.3；block-major 满块原逻辑实际接受并新增 planar/interleaved 自动化回归；未获用户要求不修改 staging area
+Audit round: 4
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: low 缺 allocator partial-reservation/publication 确定性失败注入；当前 RAII 和显式 rollback 审查正确
+Commands: fresh cached-dependency configure configure/build + full 96/96；Debug/ASAN+UBSAN/TSAN focused 各 19/19；并发生命周期 repeat 100；format-check；git diff --check
+Residual risks: P10.1 增加 allocator fault-injection，Owner: Agent A；P7.3 实现物理 64-byte 对齐、allocator 硬预算和过期 reservation cleanup；P8.2-P8.4 真实 GPU 验收前由用户启动带 NVIDIA 支持的 Docker
+
+Task ID: P7.2
+Owner: Agent A
+Dependencies: P7.1
+Scope: 实现 exact/longest-prefix 索引、完整命中证明、命中层/块/缺失范围、并发更新一致性和 prefix benchmark
+Implementation decisions: 索引按不含 token identity 的完整 tensor compatibility 分区；query 传入临时 token ID span 和严格递增 reusable lengths，由索引单遍计算 cumulative SHA-256 并验证完整 query digest；候选命中后二次比较完整 compatibility bytes 与 digest，更新/驱逐和查询由 shared mutex 线性化
+Condition evidence: 有界 MatchIndex exact/longest-prefix；请求 token IDs 单遍重算 cumulative SHA-256 与完整 compatibility 二次校验；MatchResult 返回 hit token/layer/chunks/missing range；canonical-key-specific erase 和 shared_mutex 线性化 insert/erase/query；Release 54-case benchmark 覆盖 128/1024/4096 tokens、2/16/64 objects、1/4/16 readers、partial-hit/miss
+Changed files: CMakeLists.txt, include/kvstore/kvcache/match_index.hpp, src/kvcache/match_index.cpp, tests/unit/kvcache_match_test.cpp, benchmarks/kvcache_match_benchmark.cpp, docs/kvcache-match.md, todolist/todolist.md
+Commands: cmake Debug build；ctest Debug 101/101；ASAN+UBSAN focused 5/5；TSAN focused 5/5；Release kvcache_match_benchmark；format-check；git diff --check
+Test result: 初版 Debug 101/101 pass；二审修复后 Debug/ASAN+UBSAN/TSAN focused 各 8/8 pass；Release 54-case matrix 0.022-0.502 M lookup/s single reader、0.052-1.86 M lookup/s at 16 readers；format/diff checks pass
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: high Entry identity 未包含 canonical key，物理 chunk 变体可误判重复且 Erase 删除错误对象；high lookup 可按超大 chunk_count 在锁内无界分配且 index/prefix 无上限；medium collision/layout/digest 测试被残留字段变化遮蔽；medium 并发生命周期覆盖不足；medium benchmark 三维耦合且仅 exact hit
+Commands: Debug full 101/101；Debug/ASAN+UBSAN/TSAN focused 5/5；并发 repeat 100；Release benchmark 三次；format-check；git diff --check
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 2
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: high prefix digest 可由调用方伪造而未绑定 query token 序列；medium duplicate 判定晚于容量检查；medium variant-limit 与并发重叠证据不足；low benchmark 无 warmup/barrier/repeat
+Commands: Debug full 104/104；修复前后 focused Debug/ASAN+UBSAN/TSAN 各 8/8；TSAN repeat 100；Release 54-case benchmark；format-check；git diff --check
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 3
+Audit round: 3
+Auditor: Agent B
+Verdict: fail
+Findings: medium entry-limit 自动化证据仍与 variant-limit 耦合，删除 max_entries enforcement 后测试仍会通过；无 critical/high 实现缺陷
+Commands: Debug full 104/104；Debug/ASAN+UBSAN/TSAN focused 各 8/8；并发 repeat 100；Release 54-case matrix；format-check；git diff --check
+Residual risks: none；补不同 token length 的独立 max_entries 回归后请求 round 4
+Audit round: 4
+Auditor: Agent B
+Verdict: pass
+Findings: none
+Commands: KvCacheMatchTest 8/8；format-check；git diff --check；审查当前 P7.2 实现、测试、benchmark、文档和 CMake
+Residual risks: none
+
+Task ID: P7.3
+Owner: Agent A
+Dependencies: P4.3, P7.1
+Scope: 实现 resident/loading/evicting/disk-only/failed 状态机、64-byte aligned resident pool、不可变磁盘 chunk store、双向迁移、并发 load 合并与 pin 生命周期
+Implementation decisions: resident pool 使用按 chunk size 分级的 64-byte aligned allocator 和硬预算；磁盘按 object key 分目录、chunk SHA-256 内容寻址，metadata 最后原子发布；同 key loading 使用共享状态/condition variable 合并，deadline/cancel waiter 不取消其他消费者需要的 I/O
+Condition evidence: TierState 合法转换验证；ResidentPool 64-byte aligned 硬预算及 usage/fragmentation/peak/high-low watermark 统计；KVD1 metadata-last 原子发布、chunk CRC32/SHA-256 与整对象 SHA-256 校验、启动重开和未发布数据清理；resident/disk 双向迁移、同对象 load condition-variable 合并、waiter deadline/stop_token 独立取消、shared pin 跨 eviction/delete 生命周期；ENOSPC-equivalent write/metadata rename 故障注入与 quota/state rollback
+Changed files: CMakeLists.txt, include/kvstore/kvcache/tiered_store.hpp, src/kvcache/tiered_store.cpp, tests/unit/kvcache_tiered_store_test.cpp, docs/kvcache-tiering.md, todolist/todolist.md
+Commands: cmake --build build -j2；ctest --test-dir build --output-on-failure；cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined；cmake --build build-asan -j2；ctest --test-dir build-asan --output-on-failure -R 'KvCache(TierState|ResidentPool|TieredStore)Test'；cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread；cmake --build build-tsan -j2；setarch x86_64 -R ctest --test-dir build-tsan --output-on-failure -R 'KvCache(TierState|ResidentPool|TieredStore)Test'；clang-format --dry-run --Werror 新增 3 文件；git diff --check
+Test result: Debug full 116/116 pass；首审修复后 Debug/ASAN+UBSAN/TSAN focused 各 14/14 pass；format-check pass；git diff --check pass
+Known risks: synchronous promotion/publication I/O intentionally runs in caller thread；P7.4 负责基于本轮 high/low watermark 统计接入淘汰策略；未新增 allocator fault-injection（登记 P10.1，Owner: Agent A）
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: high Put 插入 loading/reserve 后异常可泄漏状态与 quota；high Delete 进入 evicting 后路径异常可永久卡住；high Delete 和新 shard 发布目录 fsync 不完整；medium 仅测逻辑 quota、缺 ENOSPC 写失败注入；medium 默认空 handle 可解引用 null；low metadata 尾长度减法可能下溢
+Commands: KvCacheTieredStoreTest 10/10；静态审查 tiered store/state/pool/disk format
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 2
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: high delete fsync fault hook 抛异常可遗留 evicting；high restart 未验证完整 shard 路径且忽略重复 canonical key；medium 路径组件/symlink 与 O_NOFOLLOW 防护不足；medium promotion handle 使用 caller expected manifest 丢失 persisted checksum/timestamps；medium 缺 after-progress partial write/read 注入；low moved-from handle 有意保持有效但文档未说明
+Commands: Debug/ASAN+UBSAN/TSAN focused 各 16/16；format-check；git diff --check；静态审查
+Residual risks: none；阻塞项进入 Agent A 修复并请求 round 3
+Audit round: 3
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Residual risks: none
+
+Task ID: P7.4
+Owner: Agent A
+Dependencies: P7.2, P7.3
+Scope: 实现可解释的 LRU/GDSF 准入和驱逐评分、有界 priority/deadline load 队列、tenant 公平调度、I/O 并发与字节配额、快速 miss 和策略指标
+Implementation decisions: ShouldAdmit 采用先计算后提交，拒绝仅更新 bounded rejection metric，不改变 clock/frequency/residency/tracked records；score 使用 long double 中间值并将正溢出 clamp 到 double max，NaN/负值/未知 enum 返回 Status；policy/scheduler 内部 mutex 线性化且 metrics 按值快照；Pop 清理 expired、跳过 I/O blocked request，并在 eligible 集合内按 priority/deadline/id 排序，tenant 采用 deterministic bounded quantum；deadline 使用 unsigned tick distance 避免 signed time_point subtraction overflow；移除 callback hook，data-only fail_activation 在状态变更前失败；Submit 成功插入前不 compact，Pop/Cancel no-throw prune 并修正 cursor；server runtime 装配归 P7.5
+Condition evidence: policy.hpp/policy.cpp expose checked Result-based LRU/GDSF explanations, transactional admission, bounded scans/tracking, workload classes, internally synchronized value metrics, and bounded Submit/Pop/Complete/Cancel scheduling；tests independently cover rejected-state preservation, enum/non-finite/overflow, activation failure then Metrics no-deadlock/state leak, min/max deadline feasibility, blocked/expired selection, priority/deadline/fairness, cancellation, tenant metadata cleanup gauge, bounds and TSAN concurrency；74-request simulator computes actual misses/cost/p95 and Release gate requires GDSF cost/p95 improvement
+Changed files: CMakeLists.txt, config/config.json, tools/compat/config.json, include/kvstore/config/config.hpp, src/config/config.cpp, include/kvstore/kvcache/policy.hpp, src/kvcache/policy.cpp, src/kvcache/tiered_store.cpp (format only), tests/unit/config_test.cpp, tests/unit/kvcache_policy_test.cpp, benchmarks/kvcache_policy_benchmark.cpp, docs/kvcache-policy.md, docs/p7-policy-benchmark.md, todolist/todolist.md
+Commands: cmake Debug configure/build；ctest Debug focused and full；cmake ASAN+UBSAN configure/build + focused ctest；cmake TSAN configure/build + setarch x86_64 -R focused ctest；cmake Release build kvcache_policy_benchmark + execute；cmake --build build --target format-check；git diff --check
+Test result: round 2 remediation Debug focused 16/16 pass；ASAN+UBSAN focused 16/16 pass；TSAN focused 16/16 pass including concurrent policy/scheduler test；repository format-check and git diff --check pass；prior full Debug 142/142 and Release deterministic trace remain valid: LRU requests=74 misses=15 cost=1302 p95=100, GDSF requests=74 misses=38 cost=137 p95=1
+Known risks: validated KvCacheConfig is not yet constructed by server because P7.5 owns request-path/TieredStore integration；trace latency is deterministic model units and makes no wall-clock performance claim
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: high ShouldAdmit rejected decisions mutate existing/tracked state；high Pop exception ordering can leak counters/reservations；high non-finite score overflow is not rejected or clamped and enum values are not validated；high policy and scheduler are not internally thread-safe and Metrics exposes mutable shared state by reference；high Pop lets a blocked/expired highest-ranked request hide eligible work；medium deterministic comparison hardcodes costs instead of simulating misses/latency and lacks p95 evidence；medium runtime config is parsed but not wired into server construction；low repository format-check fails in latest P7.3 tiered_store.cpp changes
+Commands: Agent B static diff/API/test review and Debug focused execution
+Residual risks: none；全部 findings 进入 Agent A round 1 修复，P7.4 保持 [~]
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: high scheduler invokes arbitrary before_activate callback while mutex is held, permitting deadlock；high deadline subtraction can overflow for extreme steady_clock time_points；high Submit compacts tenant metadata before insertion, so allocation failure can leave cursor/queue state changed；medium Pop/Cancel pruning and cursor handling do not prove bounded tenant metadata；medium missing callback/Metrics deadlock regression, extreme deadline, and cleanup tests
+Commands: Agent B static review of round 1 diff/API and focused test evidence
+Residual risks: round 2 findings enter Agent A remediation；P7.4 remains [~]
+```
 
 ---
 
@@ -812,9 +1067,9 @@ Audit round: <N>
 
 ## 当前下一步
 
-- [ ] 从 P0.1 开始冻结首版协议与一致性目标
-- [ ] 完成 P0.2 工程骨架后再并行推进 P0.3/P0.4
-- [ ] M0 审计通过前不得开始网络、复制或 KVCache 性能优化
+- [x] M0/M1 已依据 P0/P1 最终 `pass` 审计补正里程碑状态
+- [~] 实现并审计 P7.1；通过后按依赖推进 P7.2/P7.3
+- [!] P8.2-P8.4 真实 GPU 验收等待带 NVIDIA 支持的 Docker daemon 可用
 
 ## 工作记录模板
 

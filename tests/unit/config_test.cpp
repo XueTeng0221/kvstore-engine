@@ -28,6 +28,25 @@ TEST(ConfigTest, LoadsDefaultConfiguration) {
   EXPECT_EQ(result.value().replication.backlog_slots, 1024U);
 }
 
+TEST(ConfigTest, RejectsInvalidKvCachePolicySchedulerLimits) {
+  auto json = DefaultJson();
+  json["kvcache"]["admission_policy"] = "unknown";
+  auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().message().find("$.kvcache"), std::string_view::npos);
+
+  for (const auto* field : {"max_pending_loads", "max_inflight_io_bytes", "max_policy_scan",
+                            "tenant_quantum", "max_tracked_objects"}) {
+    json = DefaultJson();
+    json["kvcache"][field] = 0;
+    result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+    EXPECT_FALSE(result.ok()) << field;
+  }
+  json = DefaultJson();
+  json["kvcache"]["low_reuse_weight"] = -1.0;
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+}
+
 TEST(ConfigTest, RejectsUnknownField) {
   const auto result = Config::Parse(R"({"server":{},"unexpected":1})");
   ASSERT_FALSE(result.ok());

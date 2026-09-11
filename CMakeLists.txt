@@ -88,6 +88,9 @@ target_link_libraries(kvstore_common PUBLIC kvstore_options nlohmann_json::nlohm
 add_library(kvstore_kvcache
   src/kvcache/model.cpp
   src/kvcache/chunk_registry.cpp
+  src/kvcache/match_index.cpp
+  src/kvcache/tiered_store.cpp
+  src/kvcache/policy.cpp
 )
 target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
@@ -140,6 +143,9 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/protocol_test.cpp
     tests/unit/persistence_test.cpp
     tests/unit/kvcache_model_test.cpp
+    tests/unit/kvcache_match_test.cpp
+    tests/unit/kvcache_tiered_store_test.cpp
+    tests/unit/kvcache_policy_test.cpp
   )
   target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_unit_tests PRIVATE KVSTORE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -161,4 +167,8 @@ endif()
 if(KVSTORE_BUILD_BENCHMARKS)
   add_executable(engine_benchmark benchmarks/engine_benchmark.cpp)
   target_link_libraries(engine_benchmark PRIVATE kvstore_engine_lib kvstore_options)
+  add_executable(kvcache_match_benchmark benchmarks/kvcache_match_benchmark.cpp)
+  target_link_libraries(kvcache_match_benchmark PRIVATE kvstore_kvcache kvstore_options)
+  add_executable(kvcache_policy_benchmark benchmarks/kvcache_policy_benchmark.cpp)
+  target_link_libraries(kvcache_policy_benchmark PRIVATE kvstore_kvcache kvstore_options)
 endif()

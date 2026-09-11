@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -209,9 +210,20 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
     return Invalid("$.kvcache", "watermarks must satisfy 0 < low < high < 1");
   }
   if (!OneOf(config.kvcache.match_policy, {"exact", "longest-prefix"}) ||
-      config.kvcache.admission_policy != "cost-aware-lru" ||
-      config.kvcache.eviction_policy != "cost-aware-lru") {
+      !OneOf(config.kvcache.admission_policy, {"lru", "gdsf"}) ||
+      !OneOf(config.kvcache.eviction_policy, {"lru", "gdsf"})) {
     return Invalid("$.kvcache", "unknown match, admission, or eviction policy");
+  }
+  if (config.kvcache.max_pending_loads == 0 || config.kvcache.max_inflight_io_bytes == 0 ||
+      config.kvcache.max_policy_scan == 0 || config.kvcache.tenant_quantum == 0 ||
+      config.kvcache.max_tracked_objects == 0) {
+    return Invalid("$.kvcache", "scheduler limits must be positive");
+  }
+  if (!std::isfinite(config.kvcache.prefill_weight) ||
+      !std::isfinite(config.kvcache.decode_weight) ||
+      !std::isfinite(config.kvcache.low_reuse_weight) || config.kvcache.prefill_weight < 0.0 ||
+      config.kvcache.decode_weight < 0.0 || config.kvcache.low_reuse_weight < 0.0) {
+    return Invalid("$.kvcache", "workload weights must be finite and non-negative");
   }
   if (!OneOf(config.observability.log_level, {"debug", "info", "warning", "error"})) {
     return Invalid("$.observability.log_level", "unknown level");
@@ -294,10 +306,13 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
                      {"role", "node_id", "upstream", "backlog_slots", "handshake_timeout_ms",
                       "heartbeat_interval_ms", "backend"});
   if (!status.ok()) return status;
-  status = CheckKeys(root.at("kvcache"), "$.kvcache",
-                     {"memory_budget_bytes", "disk_budget_bytes", "high_watermark", "low_watermark",
-                      "chunk_bytes", "match_policy", "admission_policy", "eviction_policy",
-                      "max_concurrent_loads", "load_timeout_ms"});
+  status =
+      CheckKeys(root.at("kvcache"), "$.kvcache",
+                {"memory_budget_bytes", "disk_budget_bytes", "high_watermark", "low_watermark",
+                 "chunk_bytes", "match_policy", "admission_policy", "eviction_policy",
+                 "max_concurrent_loads", "load_timeout_ms", "max_pending_loads",
+                 "max_inflight_io_bytes", "max_policy_scan", "tenant_quantum",
+                 "max_tracked_objects", "prefill_weight", "decode_weight", "low_reuse_weight"});
   if (!status.ok()) return status;
   status = CheckKeys(
       root.at("observability"), "$.observability",
@@ -363,6 +378,14 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
   KVSTORE_GET(kvcache, eviction_policy, std::string);
   KVSTORE_GET(kvcache, max_concurrent_loads, std::size_t);
   KVSTORE_GET(kvcache, load_timeout_ms, std::uint64_t);
+  KVSTORE_GET(kvcache, max_pending_loads, std::size_t);
+  KVSTORE_GET(kvcache, max_inflight_io_bytes, std::uint64_t);
+  KVSTORE_GET(kvcache, max_policy_scan, std::size_t);
+  KVSTORE_GET(kvcache, tenant_quantum, std::uint32_t);
+  KVSTORE_GET(kvcache, max_tracked_objects, std::size_t);
+  KVSTORE_GET(kvcache, prefill_weight, double);
+  KVSTORE_GET(kvcache, decode_weight, double);
+  KVSTORE_GET(kvcache, low_reuse_weight, double);
   KVSTORE_GET(observability, log_level, std::string);
   KVSTORE_GET(observability, metrics_enabled, bool);
   KVSTORE_GET(observability, metrics_address, std::string);
@@ -430,7 +453,11 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
                   kvcache_high_watermark.value(), kvcache_low_watermark.value(),
                   kvcache_chunk_bytes.value(), kvcache_match_policy.value(),
                   kvcache_admission_policy.value(), kvcache_eviction_policy.value(),
-                  kvcache_max_concurrent_loads.value(), kvcache_load_timeout_ms.value()},
+                  kvcache_max_concurrent_loads.value(), kvcache_load_timeout_ms.value(),
+                  kvcache_max_pending_loads.value(), kvcache_max_inflight_io_bytes.value(),
+                  kvcache_max_policy_scan.value(), kvcache_tenant_quantum.value(),
+                  kvcache_max_tracked_objects.value(), kvcache_prefill_weight.value(),
+                  kvcache_decode_weight.value(), kvcache_low_reuse_weight.value()},
       .observability = {observability_log_level.value(), observability_metrics_enabled.value(),
                         observability_metrics_address.value(), observability_metrics_port.value(),
                         observability_tracing_enabled.value()}};
@@ -538,7 +565,15 @@ std::string Config::ToRedactedJson() const {
         {"admission_policy", kvcache.admission_policy},
         {"eviction_policy", kvcache.eviction_policy},
         {"max_concurrent_loads", kvcache.max_concurrent_loads},
-        {"load_timeout_ms", kvcache.load_timeout_ms}}},
+        {"load_timeout_ms", kvcache.load_timeout_ms},
+        {"max_pending_loads", kvcache.max_pending_loads},
+        {"max_inflight_io_bytes", kvcache.max_inflight_io_bytes},
+        {"max_policy_scan", kvcache.max_policy_scan},
+        {"tenant_quantum", kvcache.tenant_quantum},
+        {"max_tracked_objects", kvcache.max_tracked_objects},
+        {"prefill_weight", kvcache.prefill_weight},
+        {"decode_weight", kvcache.decode_weight},
+        {"low_reuse_weight", kvcache.low_reuse_weight}}},
       {"observability",
        {{"log_level", observability.log_level},
         {"metrics_enabled", observability.metrics_enabled},

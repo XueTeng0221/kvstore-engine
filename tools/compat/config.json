@@ -65,10 +65,18 @@
     "low_watermark": 0.75,
     "chunk_bytes": 4096,
     "match_policy": "longest-prefix",
-    "admission_policy": "cost-aware-lru",
-    "eviction_policy": "cost-aware-lru",
+    "admission_policy": "gdsf",
+    "eviction_policy": "gdsf",
     "max_concurrent_loads": 4,
-    "load_timeout_ms": 100
+    "load_timeout_ms": 100,
+    "max_pending_loads": 1024,
+    "max_inflight_io_bytes": 1048576,
+    "max_policy_scan": 1024,
+    "tenant_quantum": 1,
+    "max_tracked_objects": 1000,
+    "prefill_weight": 1.0,
+    "decode_weight": 2.0,
+    "low_reuse_weight": 0.25
   },
   "observability": {
     "log_level": "error",

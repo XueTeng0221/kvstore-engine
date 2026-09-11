@@ -91,6 +91,14 @@ struct KvCacheConfig {
   std::string eviction_policy;
   std::size_t max_concurrent_loads{};
   std::uint64_t load_timeout_ms{};
+  std::size_t max_pending_loads{};
+  std::uint64_t max_inflight_io_bytes{};
+  std::size_t max_policy_scan{};
+  std::uint32_t tenant_quantum{};
+  std::size_t max_tracked_objects{};
+  double prefill_weight{};
+  double decode_weight{};
+  double low_reuse_weight{};
 };
 
 struct ObservabilityConfig {
