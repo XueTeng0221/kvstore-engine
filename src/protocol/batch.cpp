@@ -1,6 +1,7 @@
 #include "kvstore/protocol/batch.hpp"
 
 #include <cstdint>
+#include <limits>
 
 namespace kvstore {
 namespace {
@@ -24,7 +25,7 @@ void Append(std::string& output, T value) {
 }  // namespace
 
 Status BatchParser::Feed(std::string_view bytes) {
-  if (bytes.size() > max_frame_ - buffer_.size())
+  if (buffer_.size() > max_buffer_ || bytes.size() > max_buffer_ - buffer_.size())
     return {StatusCode::kLimitExceeded, "batch buffer limit"};
   buffer_.append(bytes);
   return Status::Ok();
@@ -32,6 +33,15 @@ Status BatchParser::Feed(std::string_view bytes) {
 
 Result<std::vector<Command>> BatchParser::ParseAvailable() {
   std::vector<Command> output;
+  auto frames = ParseAvailableFrames();
+  if (!frames.ok()) return frames.status();
+  for (auto& frame : frames.value())
+    for (auto& command : frame) output.push_back(std::move(command));
+  return output;
+}
+
+Result<std::vector<std::vector<Command>>> BatchParser::ParseAvailableFrames() {
+  std::vector<std::vector<Command>> output;
   while (true) {
     if (buffer_.size() < 20) break;
     if (buffer_.substr(0, 4) != "KVB1") return Status{StatusCode::kInvalidArgument, "batch magic"};
@@ -43,6 +53,8 @@ Result<std::vector<Command>> BatchParser::ParseAvailable() {
     if (payload_size > buffer_.size() - 20) break;
     std::size_t position = 20;
     const auto end = position + static_cast<std::size_t>(payload_size);
+    std::vector<Command> frame;
+    frame.reserve(records);
     for (std::uint32_t index = 0; index < records; ++index) {
       if (position >= end) return Status{StatusCode::kCorruption, "batch record bounds"};
       const auto type = static_cast<CommandType>(static_cast<unsigned char>(buffer_[position++]));
@@ -55,7 +67,8 @@ Result<std::vector<Command>> BatchParser::ParseAvailable() {
       const auto key_size = Read<std::uint32_t>(buffer_, position);
       const auto value_size = Read<std::uint64_t>(buffer_, position + 4);
       position += 12;
-      if (key_size == 0 || value_size > end - position - key_size || key_size > end - position) {
+      if (key_size == 0 || key_size > max_key_ || value_size > max_value_ ||
+          value_size > end - position - key_size || key_size > end - position) {
         return Status{StatusCode::kCorruption, "batch record payload"};
       }
       std::string key = buffer_.substr(position, key_size);
@@ -65,13 +78,14 @@ Result<std::vector<Command>> BatchParser::ParseAvailable() {
       const bool takes_value = type == CommandType::kSet || type == CommandType::kMod;
       if (!takes_value && !value.empty())
         return Status{StatusCode::kInvalidArgument, "batch unexpected value"};
-      output.push_back({type,
-                        takes_value ? std::vector<std::string>{std::move(key), std::move(value)}
-                                    : std::vector<std::string>{std::move(key)},
-                        WriteSource::kClient});
+      frame.push_back({type,
+                       takes_value ? std::vector<std::string>{std::move(key), std::move(value)}
+                                   : std::vector<std::string>{std::move(key)},
+                       WriteSource::kClient});
     }
     if (position != end) return Status{StatusCode::kCorruption, "batch trailing record bytes"};
     buffer_.erase(0, 20 + static_cast<std::size_t>(payload_size));
+    output.push_back(std::move(frame));
   }
   return output;
 }

@@ -1,6 +1,10 @@
 #pragma once
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -10,17 +14,29 @@ enum class CommandType {
   kSet,
   kGet,
   kDel,
+  kDelMany,
   kMod,
   kExist,
   kSave,
   kLoad,
   kIncr,
   kDecr,
+  kIncrBy,
+  kDecrBy,
   kMget,
   kPing,
   kEcho,
   kClient,
-  kInfo
+  kInfo,
+  kUnknown
+};
+
+struct RequestContext {
+  std::uint64_t request_id{};
+  std::uint64_t connection_id{};
+  std::chrono::steady_clock::time_point deadline{std::chrono::steady_clock::time_point::max()};
+  std::stop_token stop;
+  std::size_t response_budget{std::numeric_limits<std::size_t>::max()};
 };
 enum class WriteSource { kClient, kAofReplay, kFullSync, kIncrementalSync };
 

@@ -7,6 +7,7 @@ include(CTest)
 
 option(KVSTORE_BUILD_TESTS "Build tests" ON)
 option(KVSTORE_BUILD_BENCHMARKS "Build benchmarks" ON)
+option(KVSTORE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
 set(KVSTORE_SANITIZERS "" CACHE STRING "Comma-separated sanitizers: address,undefined,thread")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -55,6 +56,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+FetchContent_Declare(
+  picosha2
+  URL https://github.com/okdshin/PicoSHA2/archive/refs/tags/v1.0.1.tar.gz
+  URL_HASH SHA256=9983136544234e573fe07cc1a22fdf978ad7979043e7be2e9082f6d4991ff8a8
+)
+set(PICOSHA2_TEST OFF CACHE BOOL "" FORCE)
+set(PICOSHA2_EXAMPLE OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(picosha2)
+
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/generated/kvstore/version.hpp
@@ -67,12 +77,21 @@ add_library(kvstore_common
   src/config/config.cpp
   src/persistence/aof.cpp
   src/persistence/snapshot.cpp
+  src/persistence/write_event_queue.cpp
 )
 target_include_directories(kvstore_common PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 target_link_libraries(kvstore_common PUBLIC kvstore_options nlohmann_json::nlohmann_json)
+
+add_library(kvstore_kvcache
+  src/kvcache/model.cpp
+  src/kvcache/chunk_registry.cpp
+)
+target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
+target_link_libraries(kvstore_kvcache PUBLIC kvstore_common kvstore_options)
 
 add_library(kvstore_engine_lib
   src/engine/array_engine.cpp
@@ -89,6 +108,16 @@ add_library(kvstore_engine_lib
 )
 target_include_directories(kvstore_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(kvstore_engine_lib PUBLIC kvstore_common kvstore_options)
+
+if(KVSTORE_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "KVSTORE_BUILD_FUZZERS requires Clang")
+  endif()
+  add_executable(protocol_fuzz tests/fuzz/protocol_fuzz.cpp)
+  target_link_libraries(protocol_fuzz PRIVATE kvstore_engine_lib kvstore_options)
+  target_compile_options(protocol_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+  target_link_options(protocol_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
 
 add_executable(kvstore_server src/server/main.cpp)
 target_link_libraries(kvstore_server PRIVATE kvstore_common kvstore_engine_lib kvstore_options)
@@ -110,13 +139,17 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/engine_differential_test.cpp
     tests/unit/protocol_test.cpp
     tests/unit/persistence_test.cpp
+    tests/unit/kvcache_model_test.cpp
   )
-  target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib GTest::gtest_main kvstore_options)
+  target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_unit_tests PRIVATE KVSTORE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   gtest_discover_tests(kvstore_unit_tests)
 
-  add_executable(kvstore_integration_tests tests/integration/cli_test.cpp)
-  target_link_libraries(kvstore_integration_tests PRIVATE kvstore_common GTest::gtest_main kvstore_options)
+  add_executable(kvstore_integration_tests
+    tests/integration/cli_test.cpp
+    tests/integration/server_test.cpp
+  )
+  target_link_libraries(kvstore_integration_tests PRIVATE kvstore_common kvstore_engine_lib GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_integration_tests PRIVATE
     KVSTORE_SERVER_PATH="$<TARGET_FILE:kvstore_server>"
     KVSTORE_DEFAULT_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/config.json"

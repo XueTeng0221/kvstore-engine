@@ -1,57 +1,57 @@
 {
   "server": {
     "listen_address": "127.0.0.1",
-    "port": 6380,
+    "port": 6398,
     "worker_threads": 1,
-    "max_connections": 10000,
-    "max_inflight_requests": 4096,
-    "graceful_shutdown_ms": 10000,
+    "max_connections": 128,
+    "max_inflight_requests": 128,
+    "graceful_shutdown_ms": 2000,
     "idle_timeout_ms": 30000,
     "handshake_timeout_ms": 3000,
-    "max_input_buffer_bytes": 71303168,
-    "max_output_buffer_bytes": 71303168,
-    "output_high_watermark_bytes": 33554432
+    "max_input_buffer_bytes": 1048576,
+    "max_output_buffer_bytes": 2097152,
+    "output_high_watermark_bytes": 1048576
   },
   "protocol": {
-    "enabled": ["text-kv", "resp2", "batch-v1"],
+    "enabled": ["resp2"],
     "max_key_bytes": 4096,
-    "max_value_bytes": 67108864,
-    "max_frame_bytes": 71303168,
-    "max_batch_records": 1024,
+    "max_value_bytes": 524288,
+    "max_frame_bytes": 1048576,
+    "max_batch_records": 128,
     "parse_timeout_ms": 5000
   },
   "engine": {
     "type": "hash",
-    "capacity": 1000000,
-    "array": {"reserve": 1024},
-    "hash": {"initial_buckets": 1024, "max_load_factor": 0.75},
+    "capacity": 10000,
+    "array": {"reserve": 128},
+    "hash": {"initial_buckets": 128, "max_load_factor": 0.75},
     "skiplist": {"max_level": 20, "probability": 0.5, "seed": 12648430}
   },
   "network": {
     "backend": "epoll",
     "allow_fallback": false,
     "epoll": {"max_events": 1024},
-    "io_uring": {"queue_depth": 1024, "sqpoll": false},
+    "io_uring": {"queue_depth": 128, "sqpoll": false},
     "ntyco": {"stack_bytes": 131072}
   },
   "persistence": {
-    "directory": "data",
-    "aof_enabled": true,
-    "flush_records": 256,
-    "flush_bytes": 4194304,
-    "max_aof_bytes": 1073741824,
+    "directory": ".",
+    "aof_enabled": false,
+    "flush_records": 64,
+    "flush_bytes": 1048576,
+    "max_aof_bytes": 16777216,
     "flush_interval_ms": 100,
-    "sync_policy": "everysec",
-    "snapshot_enabled": true,
+    "sync_policy": "no",
+    "snapshot_enabled": false,
     "snapshot_interval_s": 3600,
     "mmap_load": true,
     "io_uring_write": false,
     "allow_sync_fallback": true,
-    "recover_on_start": true
+    "recover_on_start": false
   },
   "replication": {
     "role": "primary",
-    "node_id": "node-1",
+    "node_id": "compat-node",
     "upstream": null,
     "backlog_slots": 1024,
     "handshake_timeout_ms": 3000,
@@ -59,20 +59,20 @@
     "backend": "reactor"
   },
   "kvcache": {
-    "memory_budget_bytes": 8589934592,
-    "disk_budget_bytes": 107374182400,
+    "memory_budget_bytes": 1048576,
+    "disk_budget_bytes": 1048576,
     "high_watermark": 0.9,
     "low_watermark": 0.75,
-    "chunk_bytes": 2097152,
+    "chunk_bytes": 4096,
     "match_policy": "longest-prefix",
     "admission_policy": "cost-aware-lru",
     "eviction_policy": "cost-aware-lru",
-    "max_concurrent_loads": 16,
+    "max_concurrent_loads": 4,
     "load_timeout_ms": 100
   },
   "observability": {
-    "log_level": "info",
-    "metrics_enabled": true,
+    "log_level": "error",
+    "metrics_enabled": false,
     "metrics_address": "127.0.0.1",
     "metrics_port": 9108,
     "tracing_enabled": false

@@ -16,6 +16,7 @@ class RespParser {
   explicit RespParser(std::size_t max_frame_bytes) : max_frame_bytes_(max_frame_bytes) {}
   [[nodiscard]] Status Feed(std::string_view bytes);
   [[nodiscard]] Result<std::vector<Command>> ParseAvailable();
+  [[nodiscard]] bool has_buffered_data() const noexcept { return !buffer_.empty(); }
 
  private:
   std::string buffer_;

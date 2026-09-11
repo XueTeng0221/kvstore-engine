@@ -18,6 +18,11 @@ struct ServerConfig {
   std::size_t max_connections{};
   std::size_t max_inflight_requests{};
   std::uint64_t graceful_shutdown_ms{};
+  std::uint64_t idle_timeout_ms{};
+  std::uint64_t handshake_timeout_ms{};
+  std::size_t max_input_buffer_bytes{};
+  std::size_t max_output_buffer_bytes{};
+  std::size_t output_high_watermark_bytes{};
 };
 
 struct ProtocolConfig {
@@ -54,12 +59,14 @@ struct PersistenceConfig {
   bool aof_enabled{};
   std::size_t flush_records{};
   std::size_t flush_bytes{};
+  std::uint64_t max_aof_bytes{};
   std::uint64_t flush_interval_ms{};
   std::string sync_policy;
   bool snapshot_enabled{};
   std::uint64_t snapshot_interval_s{};
   bool mmap_load{};
   bool io_uring_write{};
+  bool allow_sync_fallback{};
   bool recover_on_start{};
 };
 

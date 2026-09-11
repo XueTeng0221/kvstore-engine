@@ -35,7 +35,7 @@ Each record is `command:u8, key_length:u32, value_length:u64, key, value`. The r
 
 ## RESP
 
-RESP compatibility is RESP2 in v0.1. Arrays of bulk strings map to typed commands. RESP3 negotiation is rejected as unsupported until P3. Native `SET` means create-only, while RESP `SET` maps to atomic `upsert`. RESP parsing and detailed compatibility are implemented in P3.
+RESP compatibility is RESP2 in v0.1. Arrays of bulk strings map to typed commands. RESP3 negotiation (`HELLO 3`) returns an unsupported-command error while preserving the healthy RESP2 connection. Native `SET` means create-only, while RESP `SET` maps to atomic `upsert`. RESP `SAVE` is exposed as a synchronous snapshot command; `LOAD` is intentionally not exposed while AOF boundary replacement is unsupported.
 
 ## Command semantics
 

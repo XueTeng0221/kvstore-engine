@@ -99,6 +99,10 @@ Result<Command> CommandFromResp(const std::vector<std::string>& parts) {
     type = CommandType::kIncr;
   else if (name == "DECR")
     type = CommandType::kDecr;
+  else if (name == "INCRBY")
+    type = CommandType::kIncrBy;
+  else if (name == "DECRBY")
+    type = CommandType::kDecrBy;
   else if (name == "PING")
     type = CommandType::kPing;
   else if (name == "ECHO")
@@ -107,8 +111,10 @@ Result<Command> CommandFromResp(const std::vector<std::string>& parts) {
     type = CommandType::kClient;
   else if (name == "INFO")
     type = CommandType::kInfo;
+  else if (name == "SAVE")
+    type = CommandType::kSave;
   else
-    return Status{StatusCode::kUnsupported, "unknown Redis command"};
+    type = CommandType::kUnknown;
   return Command{type, {parts.begin() + 1, parts.end()}, WriteSource::kClient, true};
 }
 

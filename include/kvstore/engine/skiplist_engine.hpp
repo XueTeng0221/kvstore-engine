@@ -26,6 +26,7 @@ class SkipListEngine final : public IEngine {
   Result<std::vector<Entry>> Export(std::stop_token stop) const override;
   Status Import(const std::vector<Entry>& entries, std::stop_token stop) override;
   std::size_t Size() const override;
+  std::size_t Capacity() const noexcept override { return capacity_; }
   std::string_view Name() const noexcept override { return "skiplist"; }
   [[nodiscard]] bool ValidateInvariants() const;
 

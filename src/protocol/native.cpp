@@ -43,19 +43,6 @@ Result<std::vector<Command>> NativeParser::ParseAvailable() {
     auto value_size = ParseSize(value_text);
     if (!key_size.ok()) return key_size.status();
     if (!value_size.ok()) return value_size.status();
-    if (key_size.value() == 0 || key_size.value() > max_key_bytes_ ||
-        value_size.value() > max_value_bytes_) {
-      return Status{StatusCode::kLimitExceeded, "native key/value limit"};
-    }
-    const auto payload_start = header_end + 2;
-    if (payload_start > buffer_.size() || key_size.value() > buffer_.size() - payload_start ||
-        value_size.value() > buffer_.size() - payload_start - key_size.value())
-      break;
-    const auto total = key_size.value() + value_size.value();
-    if (total > max_frame_bytes_ - payload_start)
-      return Status{StatusCode::kLimitExceeded, "native frame limit"};
-    std::string key = buffer_.substr(payload_start, key_size.value());
-    std::string value = buffer_.substr(payload_start + key_size.value(), value_size.value());
     CommandType type;
     if (name == "SET")
       type = CommandType::kSet;
@@ -72,14 +59,31 @@ Result<std::vector<Command>> NativeParser::ParseAvailable() {
     else if (name == "LOAD")
       type = CommandType::kLoad;
     else
-      return Status{StatusCode::kUnsupported, "unknown native command"};
+      type = CommandType::kUnknown;
+    const bool management = type == CommandType::kSave || type == CommandType::kLoad;
+    if ((!management && key_size.value() == 0) || key_size.value() > max_key_bytes_ ||
+        value_size.value() > max_value_bytes_) {
+      return Status{StatusCode::kLimitExceeded, "native key/value limit"};
+    }
+    if (management && (key_size.value() != 0 || value_size.value() != 0))
+      return Status{StatusCode::kInvalidArgument, "management command requires empty payload"};
+    const auto payload_start = header_end + 2;
+    if (payload_start > buffer_.size() || key_size.value() > buffer_.size() - payload_start ||
+        value_size.value() > buffer_.size() - payload_start - key_size.value())
+      break;
+    const auto total = key_size.value() + value_size.value();
+    if (total > max_frame_bytes_ - payload_start)
+      return Status{StatusCode::kLimitExceeded, "native frame limit"};
+    std::string key = buffer_.substr(payload_start, key_size.value());
+    std::string value = buffer_.substr(payload_start + key_size.value(), value_size.value());
     const bool takes_value = type == CommandType::kSet || type == CommandType::kMod;
     if (!takes_value && value_size.value() != 0)
       return Status{StatusCode::kInvalidArgument, "unexpected native value"};
-    output.push_back({type,
-                      takes_value ? std::vector<std::string>{std::move(key), std::move(value)}
-                                  : std::vector<std::string>{std::move(key)},
-                      WriteSource::kClient});
+    std::vector<std::string> arguments;
+    if (!management)
+      arguments = takes_value ? std::vector<std::string>{std::move(key), std::move(value)}
+                              : std::vector<std::string>{std::move(key)};
+    output.push_back({type, std::move(arguments), WriteSource::kClient});
     buffer_.erase(0, payload_start + total);
   }
   return output;

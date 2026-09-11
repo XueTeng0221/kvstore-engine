@@ -120,4 +120,22 @@ TEST(ConfigTest, RedactedOutputIsCompleteAndDoesNotInventSecrets) {
   EXPECT_EQ(output.find("credentials"), std::string::npos);
 }
 
+TEST(ConfigTest, RejectsUnimplementedRuntimeOptionsAndUnsafeTimeouts) {
+  auto json = DefaultJson();
+  json["persistence"]["mmap_load"] = false;
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+
+  json = DefaultJson();
+  json["persistence"]["io_uring_write"] = true;
+  json["persistence"]["allow_sync_fallback"] = false;
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+
+  json["persistence"]["allow_sync_fallback"] = true;
+  EXPECT_TRUE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+
+  json = DefaultJson();
+  json["protocol"]["parse_timeout_ms"] = std::numeric_limits<std::uint64_t>::max();
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+}
+
 }  // namespace kvstore

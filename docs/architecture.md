@@ -8,6 +8,21 @@ The primary linearizes each single-key mutation under the selected engine's writ
 
 Client success means the mutation is visible in primary memory and accepted by the configured durability policy. `always` requires AOF data sync before success, `everysec` permits up to one flush interval of acknowledged loss, and `no` delegates persistence timing to the operating system. Replication is asynchronous in v0.1. Replica reads may be stale and expose their applied offset. No automatic failover guarantee is made.
 
+Mutations are serialized by the dispatcher. The engine mutation becomes visible first, then one
+logical `WriteEvent` is assigned its offset and event ID and submitted to the bounded event queue.
+The queue preserves transaction boundaries and applies record/byte backpressure. An ordinary sink
+failure rolls the engine mutation back and does not advance the sequence. An indeterminate durable
+commit poisons the AOF writer, preserves the visible mutation and advances the sequence so snapshot
+and replay cannot apply the event twice; subsequent writes fail until restart. Replay, full-sync and
+incremental-sync sources update storage without re-entering the same propagation chain.
+
+The AOF format is a versioned `AOT1` transaction envelope followed by one `AOC1` commit trailer.
+CRC32 covers the envelope and all event records. Each event persists source, command, key/value,
+origin node, timestamp and event checksum. Recovery applies only complete committed transactions,
+rejects discontinuities and corruption, and removes a recognized incomplete header tail before
+accepting new writes. A configured `max_aof_bytes` is the v0.1 capacity boundary; rewrite is not yet
+implemented.
+
 ## Module boundaries
 
 ```text

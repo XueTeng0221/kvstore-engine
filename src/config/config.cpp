@@ -1,5 +1,6 @@
 #include "kvstore/config/config.hpp"
 
+#include <arpa/inet.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -66,8 +67,13 @@ bool OneOf(std::string_view value, std::initializer_list<std::string_view> allow
 }
 
 Status Validate(const Config& config, const std::filesystem::path& base_directory) {
+  constexpr auto kMaxMilliseconds =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
   if (config.server.listen_address.empty())
     return Invalid("$.server.listen_address", "must not be empty");
+  in_addr listen_address{};
+  if (::inet_pton(AF_INET, config.server.listen_address.c_str(), &listen_address) != 1)
+    return Invalid("$.server.listen_address", "must be a valid IPv4 address");
   if (config.server.port == 0) return Invalid("$.server.port", "must be in range 1..65535");
   if (config.server.worker_threads == 0)
     return Invalid("$.server.worker_threads", "must be positive");
@@ -77,19 +83,35 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   if (config.server.graceful_shutdown_ms == 0) {
     return Invalid("$.server.graceful_shutdown_ms", "must be positive");
   }
+  if (config.server.idle_timeout_ms == 0 || config.server.handshake_timeout_ms == 0 ||
+      config.server.idle_timeout_ms > kMaxMilliseconds ||
+      config.server.handshake_timeout_ms > kMaxMilliseconds ||
+      config.server.graceful_shutdown_ms > kMaxMilliseconds) {
+    return Invalid("$.server", "connection timeouts must be positive");
+  }
+  if (config.server.max_input_buffer_bytes == 0 || config.server.max_output_buffer_bytes == 0 ||
+      config.server.output_high_watermark_bytes == 0 ||
+      config.server.output_high_watermark_bytes > config.server.max_output_buffer_bytes) {
+    return Invalid("$.server", "buffer limits are invalid");
+  }
+  if (config.server.max_input_buffer_bytes < config.protocol.max_frame_bytes)
+    return Invalid("$.server.max_input_buffer_bytes", "must cover one protocol frame");
   if (config.protocol.enabled.empty()) return Invalid("$.protocol.enabled", "must not be empty");
   for (const auto& protocol : config.protocol.enabled) {
     if (!OneOf(protocol, {"text-kv", "resp2", "batch-v1"})) {
       return Invalid("$.protocol.enabled", "unknown protocol " + protocol);
     }
   }
-  if (config.protocol.parse_timeout_ms == 0) {
+  if (config.protocol.parse_timeout_ms == 0 ||
+      config.protocol.parse_timeout_ms > kMaxMilliseconds) {
     return Invalid("$.protocol.parse_timeout_ms", "must be positive");
   }
   if (config.protocol.max_key_bytes == 0 || config.protocol.max_value_bytes == 0 ||
       config.protocol.max_batch_records == 0) {
     return Invalid("$.protocol", "size limits must be positive");
   }
+  if (config.protocol.max_batch_records > config.server.max_inflight_requests)
+    return Invalid("$.protocol.max_batch_records", "must not exceed max inflight requests");
   constexpr std::size_t kFrameOverhead = 128;
   const auto maximum = std::numeric_limits<std::size_t>::max();
   if (config.protocol.max_value_bytes > maximum - kFrameOverhead ||
@@ -98,6 +120,9 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
           kFrameOverhead + config.protocol.max_value_bytes + config.protocol.max_key_bytes) {
     return Invalid("$.protocol.max_frame_bytes", "too small for configured key and value limits");
   }
+  constexpr std::size_t kResponseOverhead = 128;
+  if (config.server.max_output_buffer_bytes < config.protocol.max_value_bytes + kResponseOverhead)
+    return Invalid("$.server.max_output_buffer_bytes", "must cover one maximum response");
   if (!OneOf(config.engine.type, {"array", "rbtree", "hash", "skiplist"})) {
     return Invalid("$.engine.type", "unknown engine");
   }
@@ -113,6 +138,8 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   if (!OneOf(config.network.backend, {"epoll", "io_uring", "ntyco"})) {
     return Invalid("$.network.backend", "unknown backend");
   }
+  if (config.network.backend != "epoll")
+    return Invalid("$.network.backend", "requested backend is not implemented");
   if (config.network.epoll_max_events == 0 || config.network.io_uring_queue_depth == 0 ||
       config.network.ntyco_stack_bytes < 16384) {
     return Invalid("$.network", "backend limits are invalid");
@@ -122,12 +149,23 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   }
   if (config.persistence.aof_enabled &&
       (config.persistence.flush_records == 0 || config.persistence.flush_bytes == 0 ||
-       config.persistence.flush_interval_ms == 0)) {
+       config.persistence.flush_interval_ms == 0 ||
+       config.persistence.max_aof_bytes < config.persistence.flush_bytes)) {
     return Invalid("$.persistence", "AOF flush thresholds must be positive");
   }
   if (config.persistence.snapshot_enabled && config.persistence.snapshot_interval_s == 0) {
     return Invalid("$.persistence.snapshot_interval_s", "must be positive when enabled");
   }
+  if (!config.persistence.mmap_load)
+    return Invalid("$.persistence.mmap_load", "non-mmap loading is not implemented");
+  if (config.persistence.io_uring_write && !config.persistence.allow_sync_fallback)
+    return Invalid("$.persistence.io_uring_write",
+                   "io_uring snapshot writing requires explicit synchronous fallback");
+  if (config.persistence.snapshot_enabled && config.persistence.snapshot_interval_s != 3600)
+    return Invalid("$.persistence.snapshot_interval_s", "background snapshots are not implemented");
+  if (config.server.worker_threads != 1)
+    return Invalid("$.server.worker_threads",
+                   "only the single reactor implementation is available");
   std::filesystem::path persistence_path = config.persistence.directory;
   if (persistence_path.is_relative()) persistence_path = base_directory / persistence_path;
   const auto accessible =
@@ -148,6 +186,8 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   if (config.replication.role == "replica" && !config.replication.upstream.has_value()) {
     return Invalid("$.replication.upstream", "replica requires upstream");
   }
+  if (config.replication.role == "replica")
+    return Invalid("$.replication.role", "replica mode is not implemented");
   if (config.replication.backlog_slots != 1024) {
     return Invalid("$.replication.backlog_slots", "v0.1 requires exactly 1024 slots");
   }
@@ -181,6 +221,11 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
     return Invalid("$.observability",
                    "metrics address must be non-empty and port must be 1..65535");
   }
+  if (config.observability.metrics_enabled) {
+    in_addr metrics_address{};
+    if (::inet_pton(AF_INET, config.observability.metrics_address.c_str(), &metrics_address) != 1)
+      return Invalid("$.observability.metrics_address", "must be a valid IPv4 address");
+  }
   return Status::Ok();
 }
 
@@ -199,9 +244,11 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
       return Invalid("$." + std::string(section), "required section is missing");
   }
 
-  status = CheckKeys(root.at("server"), "$.server",
-                     {"listen_address", "port", "worker_threads", "max_connections",
-                      "max_inflight_requests", "graceful_shutdown_ms"});
+  status = CheckKeys(
+      root.at("server"), "$.server",
+      {"listen_address", "port", "worker_threads", "max_connections", "max_inflight_requests",
+       "graceful_shutdown_ms", "idle_timeout_ms", "handshake_timeout_ms", "max_input_buffer_bytes",
+       "max_output_buffer_bytes", "output_high_watermark_bytes"});
   if (!status.ok()) return status;
   status = CheckKeys(root.at("protocol"), "$.protocol",
                      {"enabled", "max_key_bytes", "max_value_bytes", "max_frame_bytes",
@@ -239,9 +286,9 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
   status = CheckKeys(root.at("network").at("ntyco"), "$.network.ntyco", {"stack_bytes"});
   if (!status.ok()) return status;
   status = CheckKeys(root.at("persistence"), "$.persistence",
-                     {"directory", "aof_enabled", "flush_records", "flush_bytes",
+                     {"directory", "aof_enabled", "flush_records", "flush_bytes", "max_aof_bytes",
                       "flush_interval_ms", "sync_policy", "snapshot_enabled", "snapshot_interval_s",
-                      "mmap_load", "io_uring_write", "recover_on_start"});
+                      "mmap_load", "io_uring_write", "allow_sync_fallback", "recover_on_start"});
   if (!status.ok()) return status;
   status = CheckKeys(root.at("replication"), "$.replication",
                      {"role", "node_id", "upstream", "backlog_slots", "handshake_timeout_ms",
@@ -263,6 +310,11 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
   KVSTORE_GET(server, max_connections, std::size_t);
   KVSTORE_GET(server, max_inflight_requests, std::size_t);
   KVSTORE_GET(server, graceful_shutdown_ms, std::uint64_t);
+  KVSTORE_GET(server, idle_timeout_ms, std::uint64_t);
+  KVSTORE_GET(server, handshake_timeout_ms, std::uint64_t);
+  KVSTORE_GET(server, max_input_buffer_bytes, std::size_t);
+  KVSTORE_GET(server, max_output_buffer_bytes, std::size_t);
+  KVSTORE_GET(server, output_high_watermark_bytes, std::size_t);
   KVSTORE_GET(protocol, enabled, std::vector<std::string>);
   KVSTORE_GET(protocol, max_key_bytes, std::size_t);
   KVSTORE_GET(protocol, max_value_bytes, std::size_t);
@@ -277,12 +329,14 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
   KVSTORE_GET(persistence, aof_enabled, bool);
   KVSTORE_GET(persistence, flush_records, std::size_t);
   KVSTORE_GET(persistence, flush_bytes, std::size_t);
+  KVSTORE_GET(persistence, max_aof_bytes, std::uint64_t);
   KVSTORE_GET(persistence, flush_interval_ms, std::uint64_t);
   KVSTORE_GET(persistence, sync_policy, std::string);
   KVSTORE_GET(persistence, snapshot_enabled, bool);
   KVSTORE_GET(persistence, snapshot_interval_s, std::uint64_t);
   KVSTORE_GET(persistence, mmap_load, bool);
   KVSTORE_GET(persistence, io_uring_write, bool);
+  KVSTORE_GET(persistence, allow_sync_fallback, bool);
   KVSTORE_GET(persistence, recover_on_start, bool);
   KVSTORE_GET(replication, role, std::string);
   KVSTORE_GET(replication, node_id, std::string);
@@ -350,7 +404,10 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
   Config config{
       .server = {server_listen_address.value(), server_port.value(), server_worker_threads.value(),
                  server_max_connections.value(), server_max_inflight_requests.value(),
-                 server_graceful_shutdown_ms.value()},
+                 server_graceful_shutdown_ms.value(), server_idle_timeout_ms.value(),
+                 server_handshake_timeout_ms.value(), server_max_input_buffer_bytes.value(),
+                 server_max_output_buffer_bytes.value(),
+                 server_output_high_watermark_bytes.value()},
       .protocol = {protocol_enabled.value(), protocol_max_key_bytes.value(),
                    protocol_max_value_bytes.value(), protocol_max_frame_bytes.value(),
                    protocol_max_batch_records.value(), protocol_parse_timeout_ms.value()},
@@ -361,9 +418,10 @@ Result<Config> Decode(const Json& root, const std::filesystem::path& base_direct
                   uring_depth.value(), uring_sqpoll.value(), ntyco_stack.value()},
       .persistence = {persistence_directory.value(), persistence_aof_enabled.value(),
                       persistence_flush_records.value(), persistence_flush_bytes.value(),
-                      persistence_flush_interval_ms.value(), persistence_sync_policy.value(),
-                      persistence_snapshot_enabled.value(), persistence_snapshot_interval_s.value(),
-                      persistence_mmap_load.value(), persistence_io_uring_write.value(),
+                      persistence_max_aof_bytes.value(), persistence_flush_interval_ms.value(),
+                      persistence_sync_policy.value(), persistence_snapshot_enabled.value(),
+                      persistence_snapshot_interval_s.value(), persistence_mmap_load.value(),
+                      persistence_io_uring_write.value(), persistence_allow_sync_fallback.value(),
                       persistence_recover_on_start.value()},
       .replication = {replication_role.value(), replication_node_id.value(), replication_upstream,
                       replication_backlog_slots.value(), replication_handshake_timeout_ms.value(),
@@ -416,7 +474,12 @@ std::string Config::ToRedactedJson() const {
         {"worker_threads", server.worker_threads},
         {"max_connections", server.max_connections},
         {"max_inflight_requests", server.max_inflight_requests},
-        {"graceful_shutdown_ms", server.graceful_shutdown_ms}}},
+        {"graceful_shutdown_ms", server.graceful_shutdown_ms},
+        {"idle_timeout_ms", server.idle_timeout_ms},
+        {"handshake_timeout_ms", server.handshake_timeout_ms},
+        {"max_input_buffer_bytes", server.max_input_buffer_bytes},
+        {"max_output_buffer_bytes", server.max_output_buffer_bytes},
+        {"output_high_watermark_bytes", server.output_high_watermark_bytes}}},
       {"protocol",
        {{"enabled", protocol.enabled},
         {"max_key_bytes", protocol.max_key_bytes},
@@ -447,12 +510,14 @@ std::string Config::ToRedactedJson() const {
         {"aof_enabled", persistence.aof_enabled},
         {"flush_records", persistence.flush_records},
         {"flush_bytes", persistence.flush_bytes},
+        {"max_aof_bytes", persistence.max_aof_bytes},
         {"flush_interval_ms", persistence.flush_interval_ms},
         {"sync_policy", persistence.sync_policy},
         {"snapshot_enabled", persistence.snapshot_enabled},
         {"snapshot_interval_s", persistence.snapshot_interval_s},
         {"mmap_load", persistence.mmap_load},
         {"io_uring_write", persistence.io_uring_write},
+        {"allow_sync_fallback", persistence.allow_sync_fallback},
         {"recover_on_start", persistence.recover_on_start}}},
       {"replication",
        {{"role", replication.role},
