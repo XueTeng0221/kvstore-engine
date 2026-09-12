@@ -96,8 +96,8 @@ std::vector<std::uint32_t> ChunkIndices(const TensorManifest& manifest) {
 MatchResult MakeResult(const TensorManifest& manifest, const CacheKey& key,
                        std::uint64_t query_tokens) {
   MatchResult result{
-      key, manifest.token_count, manifest.layer_begin, manifest.layer_count, ChunkIndices(manifest),
-      {}};
+      key, manifest, manifest.token_count, manifest.layer_begin, manifest.layer_count,
+      ChunkIndices(manifest), {}};
   if (manifest.token_count < query_tokens) {
     result.missing_tokens.push_back({manifest.token_count, query_tokens});
   }

@@ -22,9 +22,12 @@ invalidating an in-flight tensor view.
 
 The first caller promoting a disk-only object becomes the synchronous I/O leader. Other callers
 wait on that object's shared state. Their `stop_token` or steady-clock deadline ends only their wait
-and never cancels the leader or another consumer's required I/O. Capacity and transient I/O failures
-leave the object disk-only for retry; integrity failures move it to failed. No detached worker is
-created.
+and never cancels the leader or another consumer's required I/O. The request path bounds the shared
+operation separately and joins its owned worker during shutdown. Filesystem syscalls are synchronous:
+the stop token cannot interrupt a syscall already in progress, so shutdown completion can still be
+delayed by the kernel's filesystem behavior; no detached worker is created and no hard interruption
+bound is promised. Capacity and transient I/O failures leave the object disk-only for retry; integrity
+failures move it to failed.
 
 ## Disk format and publication
 

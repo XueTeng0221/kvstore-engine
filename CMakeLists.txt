@@ -91,6 +91,7 @@ add_library(kvstore_kvcache
   src/kvcache/match_index.cpp
   src/kvcache/tiered_store.cpp
   src/kvcache/policy.cpp
+  src/kvcache/request_path.cpp
 )
 target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
@@ -146,6 +147,7 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/kvcache_match_test.cpp
     tests/unit/kvcache_tiered_store_test.cpp
     tests/unit/kvcache_policy_test.cpp
+    tests/unit/kvcache_request_path_test.cpp
   )
   target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_unit_tests PRIVATE KVSTORE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

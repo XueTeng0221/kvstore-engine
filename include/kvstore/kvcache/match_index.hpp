@@ -21,6 +21,7 @@ struct TokenRange {
 
 struct MatchResult {
   CacheKey key;
+  TensorManifest source_manifest;
   std::uint64_t hit_tokens{};
   std::uint32_t layer_begin{};
   std::uint32_t layer_count{};

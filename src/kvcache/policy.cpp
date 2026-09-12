@@ -376,6 +376,13 @@ Status LoadScheduler::Validate() const {
 Result<LoadMissReason> LoadScheduler::Submit(LoadRequest request, Clock::time_point now) {
   const auto config_status = Validate();
   if (!config_status.ok()) return config_status;
+  {
+    std::lock_guard lock(mutex_);
+    if (config_.fail_submit) {
+      config_.fail_submit = false;
+      return Status{StatusCode::kInternal, "injected submit failure"};
+    }
+  }
   if (request.tenant.empty() || request.key.empty() || request.id == 0 || request.bytes == 0 ||
       request.estimated_io_bytes == 0 || request.estimated_duration < Clock::duration::zero()) {
     return Invalid("invalid load request");
@@ -429,6 +436,10 @@ Result<LoadTask> LoadScheduler::Pop(Clock::time_point now) {
   const auto config_status = Validate();
   if (!config_status.ok()) return config_status;
   std::lock_guard lock(mutex_);
+  if (config_.fail_pop) {
+    config_.fail_pop = false;
+    return Status{StatusCode::kInternal, "injected pop failure"};
+  }
   PruneEmptyQueuesLocked();
   if (active_count_ >= config_.max_concurrent_loads) {
     return Status{StatusCode::kBusy, "load concurrency limit"};
@@ -513,6 +524,17 @@ Status LoadScheduler::Complete(std::uint64_t id, bool /*success*/, std::uint64_t
   const auto config_status = Validate();
   if (!config_status.ok()) return config_status;
   std::lock_guard lock(mutex_);
+  if (config_.fail_complete) {
+    config_.fail_complete = false;
+    const auto active = active_requests_.find(id);
+    if (active != active_requests_.end()) {
+      active_bytes_ -= active->second;
+      active_requests_.erase(active);
+      --active_count_;
+      metrics_.inflight_bytes = active_bytes_;
+    }
+    return Status{StatusCode::kInternal, "injected completion failure"};
+  }
   const auto active = active_requests_.find(id);
   if (active == active_requests_.end()) return Invalid("unknown active load");
   if (actual_io_bytes > active->second) return Invalid("completion exceeds reserved I/O bytes");

@@ -53,7 +53,8 @@ struct ObjectFixture {
     const std::array<std::uint32_t, 4> tokens{1, 2, 3, 4};
     manifest.token_digest = TokenDigest(tokens).value();
     manifest.token_count = tokens.size();
-    manifest.layer_count = 1;
+     manifest.layer_begin = 7;
+     manifest.layer_count = 1;
     manifest.shape = {2, 1, 4, 2, 4};
     manifest.axis_order = {TensorAxis::kKeyValue, TensorAxis::kLayer, TensorAxis::kToken,
                            TensorAxis::kHead, TensorAxis::kHeadDimension};
@@ -147,6 +148,31 @@ TEST(KvCacheTieredStoreTest, PersistsEvictsPromotesAndReopens) {
   ASSERT_TRUE(opened.ok());
   EXPECT_EQ(opened.value()->State(object.manifest).value(), TierState::kDiskOnly);
   EXPECT_TRUE(opened.value()->Lookup(object.manifest).ok());
+}
+
+TEST(KvCacheTieredStoreTest, LoadsOnlyChunkAlignedRangeAndRejectsInvalidRange) {
+  TemporaryDirectory temporary;
+  ObjectFixture object;
+  auto opened = TieredStore::Open(Config(temporary.path()));
+  ASSERT_TRUE(opened.ok());
+  auto store = std::move(opened.value());
+  ASSERT_TRUE(store->Put(object.manifest, object.chunks).ok());
+  ASSERT_TRUE(store->Evict(object.manifest).ok());
+  const TensorRange range{2, 4, 7, 8};
+  auto loaded = store->LoadRanges(object.manifest, std::span(&range, 1));
+  ASSERT_TRUE(loaded.ok());
+  ASSERT_EQ(loaded.value().chunk_count(), 2U);
+  EXPECT_TRUE(std::ranges::equal(loaded.value().Chunk(0).value(), object.chunks[0]));
+  EXPECT_TRUE(std::ranges::equal(loaded.value().Chunk(1).value(), object.chunks[1]));
+  EXPECT_EQ(loaded.value().manifest().chunk_count, object.manifest.chunk_count);
+  EXPECT_EQ(loaded.value().manifest().payload_bytes, object.manifest.payload_bytes);
+  ASSERT_NE(loaded.value().range_view(), nullptr);
+  EXPECT_EQ(loaded.value().range_view()->ranges, std::vector<TensorRange>{range});
+  EXPECT_EQ(loaded.value().physical_chunk_index(0), 0U);
+  EXPECT_EQ(loaded.value().physical_chunk_index(1), 1U);
+  const TensorRange invalid{0, 5, 7, 8};
+  EXPECT_EQ(store->LoadRanges(object.manifest, std::span(&invalid, 1)).status().code(),
+            StatusCode::kInvalidArgument);
 }
 
 TEST(KvCacheTieredStoreTest, EnforcesDiskQuotaAndDeleteReclaimsIt) {

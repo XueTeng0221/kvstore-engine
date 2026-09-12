@@ -20,6 +20,7 @@ enum class StatusCode : std::uint16_t {
   kReadOnly = 9,
   kBusy = 10,
   kInternal = 11,
+  kDeadlineExceeded = 12,
 };
 
 class Status {
@@ -61,6 +62,8 @@ class Status {
         return "BUSY";
       case StatusCode::kInternal:
         return "INTERNAL";
+      case StatusCode::kDeadlineExceeded:
+        return "DEADLINE_EXCEEDED";
     }
     return "INTERNAL";
   }

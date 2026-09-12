@@ -493,12 +493,17 @@ struct TieredResidentHandle::Pin {
   TensorManifest manifest;
   CacheKey key;
   std::vector<ResidentAllocation> chunks;
+  std::shared_ptr<const TensorRangeView> view;
 };
 
 TieredResidentHandle::TieredResidentHandle(std::shared_ptr<const Pin> pin) : pin_(std::move(pin)) {}
 const TensorManifest& TieredResidentHandle::manifest() const noexcept { return pin_->manifest; }
 const CacheKey& TieredResidentHandle::key() const noexcept { return pin_->key; }
 std::size_t TieredResidentHandle::chunk_count() const noexcept { return pin_->chunks.size(); }
+const TensorRangeView* TieredResidentHandle::range_view() const noexcept { return pin_->view.get(); }
+std::uint32_t TieredResidentHandle::physical_chunk_index(std::size_t index) const {
+  return pin_->view == nullptr ? static_cast<std::uint32_t>(index) : pin_->view->physical_chunk_indices.at(index);
+}
 Result<ByteView> TieredResidentHandle::Chunk(std::size_t index) const {
   if (index >= pin_->chunks.size()) {
     return Status{StatusCode::kInvalidArgument, "chunk index is out of range"};
@@ -568,13 +573,100 @@ struct TieredStore::Impl {
       persisted_manifest.created_at_ns = entry->disk.created_at_ns;
       persisted_manifest.accessed_at_ns = entry->disk.accessed_at_ns;
       auto pin = std::make_shared<TieredResidentHandle::Pin>(TieredResidentHandle::Pin{
-          std::move(persisted_manifest), entry->key, std::move(allocations)});
+          std::move(persisted_manifest), entry->key, std::move(allocations), nullptr});
       return std::shared_ptr<const TieredResidentHandle::Pin>(std::move(pin));
     } catch (const std::bad_alloc&) {
       return Status{StatusCode::kLimitExceeded, "unable to allocate promoted object"};
     } catch (const std::filesystem::filesystem_error&) {
       return Status{StatusCode::kIoError, "disk chunk path failed"};
     }
+  }
+
+  Result<std::shared_ptr<const TieredResidentHandle::Pin>> LoadRanges(
+      const std::shared_ptr<Entry>& entry, const TensorManifest& manifest,
+      std::span<const TensorRange> ranges) {
+    if (ranges.empty() || manifest.chunk_bytes == 0 || manifest.payload_bytes == 0) {
+      return Status{StatusCode::kInvalidArgument, "tiered load ranges are empty or invalid"};
+    }
+    if (manifest.layout != TensorLayout::kLayerMajor ||
+        manifest.key_value_packing != KeyValuePacking::kPlanar) {
+      return Status{StatusCode::kUnsupported, "tiered range loading does not support this layout"};
+    }
+    const auto axis_index = [&manifest](TensorAxis axis) -> Result<std::size_t> {
+      const auto iterator = std::ranges::find(manifest.axis_order, axis);
+      if (iterator == manifest.axis_order.end()) {
+        return Status{StatusCode::kInvalidArgument, "manifest is missing a required axis"};
+      }
+      return static_cast<std::size_t>(std::distance(manifest.axis_order.begin(), iterator));
+    };
+    const auto layer_axis = axis_index(TensorAxis::kLayer);
+    const auto token_axis = axis_index(TensorAxis::kToken);
+    if (!layer_axis.ok() || !token_axis.ok() || manifest.layer_count == 0 ||
+        manifest.token_count == 0 ||
+        manifest.layer_begin > std::numeric_limits<std::uint32_t>::max() - manifest.layer_count) {
+      return Status{StatusCode::kInvalidArgument, "manifest lacks layer/token strides"};
+    }
+    const auto layer_stride = manifest.strides_bytes[layer_axis.value()];
+    const auto token_stride = manifest.strides_bytes[token_axis.value()];
+    const auto kv_axis = axis_index(TensorAxis::kKeyValue);
+    if (layer_stride == 0 || token_stride == 0 || !kv_axis.ok() ||
+        manifest.shape[kv_axis.value()] < 2 || manifest.strides_bytes[kv_axis.value()] == 0) {
+      return Status{StatusCode::kInvalidArgument, "manifest has zero layer/token stride"};
+    }
+    std::vector<bool> selected(entry->disk.chunks.size());
+    for (const auto& range : ranges) {
+      if (range.token_begin >= range.token_end || range.token_end > manifest.token_count ||
+          range.layer_begin >= range.layer_end || range.layer_begin < manifest.layer_begin ||
+          range.layer_end > manifest.layer_begin + manifest.layer_count) {
+        return Status{StatusCode::kInvalidArgument, "tensor range is outside manifest"};
+      }
+      const auto layer_offset = static_cast<std::uint64_t>(range.layer_begin - manifest.layer_begin);
+      if (layer_offset > std::numeric_limits<std::uint64_t>::max() / layer_stride ||
+          range.token_begin > std::numeric_limits<std::uint64_t>::max() / token_stride)
+        return Status{StatusCode::kInvalidArgument, "tensor range offset overflows"};
+      const auto kv_stride = manifest.strides_bytes[kv_axis.value()];
+      for (std::uint64_t kv = 0; kv < 2; ++kv) {
+        const auto first = kv * kv_stride + layer_offset * layer_stride + range.token_begin * token_stride;
+        const auto last_layer = static_cast<std::uint64_t>(range.layer_end - manifest.layer_begin - 1);
+        const auto last_token = range.token_end - 1;
+        if (last_layer > std::numeric_limits<std::uint64_t>::max() / layer_stride ||
+            last_token > std::numeric_limits<std::uint64_t>::max() / token_stride)
+          return Status{StatusCode::kInvalidArgument, "tensor range end overflows"};
+        const auto last_base = kv * kv_stride + last_layer * layer_stride + last_token * token_stride;
+        if (last_base > std::numeric_limits<std::uint64_t>::max() - token_stride)
+          return Status{StatusCode::kInvalidArgument, "tensor range end overflows"};
+        const auto last = last_base + token_stride;
+        if (first >= manifest.payload_bytes || last > manifest.payload_bytes || last < first)
+          return Status{StatusCode::kInvalidArgument, "tensor range exceeds payload"};
+        const auto first_chunk = first / manifest.chunk_bytes;
+        const auto last_chunk = (last - 1) / manifest.chunk_bytes;
+        if (last_chunk >= selected.size())
+          return Status{StatusCode::kCorruption, "chunk metadata is incomplete"};
+        for (std::uint64_t index = first_chunk; index <= last_chunk; ++index) selected[index] = true;
+      }
+    }
+    std::vector<ResidentAllocation> allocations;
+    for (std::uint32_t index = 0; index < selected.size(); ++index) {
+      if (!selected[index]) continue;
+      const auto& chunk = entry->disk.chunks[index];
+      auto bytes = ReadFile(ObjectPath(config.directory, entry->key) / DigestHex(chunk.sha), chunk.size,
+                            config.max_object_bytes, config.io_fault, "chunk");
+      if (!bytes.ok()) return bytes.status();
+      if (Crc32(bytes.value()) != chunk.crc) return Status{StatusCode::kCorruption, "disk chunk CRC mismatch"};
+      auto digest = Sha256(bytes.value());
+      if (!digest.ok()) return digest.status();
+      if (digest.value() != chunk.sha) return Status{StatusCode::kCorruption, "disk chunk SHA-256 mismatch"};
+      auto allocation = pool.Copy(bytes.value());
+      if (!allocation.ok()) return allocation.status();
+      allocations.push_back(std::move(allocation.value()));
+    }
+    auto view = std::make_shared<TensorRangeView>();
+    view->ranges.assign(ranges.begin(), ranges.end());
+    for (std::size_t index = 0; index < selected.size(); ++index)
+      if (selected[index]) view->physical_chunk_indices.push_back(static_cast<std::uint32_t>(index));
+    return std::shared_ptr<const TieredResidentHandle::Pin>(
+        std::make_shared<TieredResidentHandle::Pin>(TieredResidentHandle::Pin{
+            manifest, entry->key, std::move(allocations), std::move(view)}));
   }
 };
 
@@ -750,7 +842,7 @@ Result<TieredResidentHandle> TieredStore::Put(const TensorManifest& manifest,
   }
   disk.disk_bytes = total + metadata.value().size();
   auto pin = std::make_shared<TieredResidentHandle::Pin>(
-      TieredResidentHandle::Pin{manifest, key.value(), std::move(allocations)});
+      TieredResidentHandle::Pin{manifest, key.value(), std::move(allocations), nullptr});
   const std::string key_string = key.value().ToString();
   const auto directory = ObjectPath(impl_->config.directory, key.value());
   const auto objects_root = impl_->config.directory / "objects";
@@ -907,6 +999,43 @@ Result<TieredResidentHandle> TieredStore::Lookup(const TensorManifest& expected,
   return Status{StatusCode::kLimitExceeded, "unable to lookup tiered object"};
 } catch (...) {
   return Status{StatusCode::kInternal, "tiered object lookup failed"};
+}
+
+Result<TieredResidentHandle> TieredStore::LoadRanges(const TensorManifest& source,
+                                                     std::span<const TensorRange> ranges,
+                                                     Deadline deadline,
+                                                     std::stop_token stop_token) try {
+  const Status validation = ValidateManifestIdentity(source);
+  if (!validation.ok()) return validation;
+  if (ranges.empty() || stop_token.stop_requested() ||
+      (deadline != Deadline::max() && std::chrono::steady_clock::now() >= deadline)) {
+    return Status{StatusCode::kCancelled, "tiered range load cancelled"};
+  }
+  auto key = CanonicalCacheKey(source);
+  auto canonical = EncodeCanonicalManifest(source);
+  if (!key.ok()) return key.status();
+  if (!canonical.ok()) return canonical.status();
+  std::shared_ptr<Impl::Entry> entry;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto iterator = impl_->entries.find(key.value().ToString());
+    if (iterator == impl_->entries.end()) return Status{StatusCode::kNotFound, "tiered object does not exist"};
+    entry = iterator->second;
+    if (entry->canonical != canonical.value()) return Status{StatusCode::kCorruption, "metadata mismatch"};
+    if (entry->state == TierState::kLoading || entry->state == TierState::kEvicting)
+      return Status{StatusCode::kBusy, "tiered object is changing"};
+    if (entry->state == TierState::kFailed) return entry->last_error;
+  }
+  auto loaded = impl_->LoadRanges(entry, source, ranges);
+  if (!loaded.ok()) return loaded.status();
+  if (stop_token.stop_requested() ||
+      (deadline != Deadline::max() && std::chrono::steady_clock::now() >= deadline))
+    return Status{StatusCode::kCancelled, "tiered range load completed after cancellation"};
+  return TieredResidentHandle(loaded.value());
+} catch (const std::bad_alloc&) {
+  return Status{StatusCode::kLimitExceeded, "unable to load tiered ranges"};
+} catch (...) {
+  return Status{StatusCode::kInternal, "tiered range load failed"};
 }
 
 Status TieredStore::Evict(const TensorManifest& expected) try {

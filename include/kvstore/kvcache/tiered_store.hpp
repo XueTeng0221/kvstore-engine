@@ -8,6 +8,7 @@
 #include <memory>
 #include <stop_token>
 #include <string_view>
+#include <span>
 #include <vector>
 
 #include "kvstore/kvcache/model.hpp"
@@ -40,6 +41,8 @@ struct ResidentPoolStats {
   bool above_high_watermark{};
   bool below_low_watermark{};
 };
+
+struct TensorRangeView;
 
 class ResidentAllocation {
  public:
@@ -82,6 +85,8 @@ class TieredResidentHandle {
   [[nodiscard]] const TensorManifest& manifest() const noexcept;
   [[nodiscard]] const CacheKey& key() const noexcept;
   [[nodiscard]] std::size_t chunk_count() const noexcept;
+  [[nodiscard]] const TensorRangeView* range_view() const noexcept;
+  [[nodiscard]] std::uint32_t physical_chunk_index(std::size_t index) const;
   [[nodiscard]] Result<ByteView> Chunk(std::size_t index) const;
 
  private:
@@ -110,6 +115,19 @@ struct TieredStoreStats {
   std::uint64_t object_count{};
 };
 
+struct TensorRange {
+  std::uint64_t token_begin{};
+  std::uint64_t token_end{};
+  std::uint32_t layer_begin{};
+  std::uint32_t layer_end{};
+  friend bool operator==(const TensorRange&, const TensorRange&) = default;
+};
+
+struct TensorRangeView {
+  std::vector<TensorRange> ranges;
+  std::vector<std::uint32_t> physical_chunk_indices;
+};
+
 class TieredStore {
  public:
   using Deadline = std::chrono::steady_clock::time_point;
@@ -123,7 +141,10 @@ class TieredStore {
                                                  const std::vector<ByteView>& chunks);
   [[nodiscard]] Result<TieredResidentHandle> Lookup(const TensorManifest& expected,
                                                     Deadline deadline = Deadline::max(),
-                                                    std::stop_token stop_token = {});
+                                                     std::stop_token stop_token = {});
+  [[nodiscard]] Result<TieredResidentHandle> LoadRanges(
+      const TensorManifest& source, std::span<const TensorRange> ranges,
+      Deadline deadline = Deadline::max(), std::stop_token stop_token = {});
   [[nodiscard]] Status Evict(const TensorManifest& expected);
   [[nodiscard]] Status Delete(const TensorManifest& expected);
   [[nodiscard]] Result<TierState> State(const TensorManifest& expected) const;

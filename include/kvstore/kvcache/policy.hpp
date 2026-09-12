@@ -125,6 +125,11 @@ struct SchedulerConfig {
   std::uint64_t max_inflight_io_bytes{256U * 1024U * 1024U};
   std::uint32_t tenant_quantum{1};
   bool fail_activation{false};
+  // Deterministic, one-shot test failures. All remain disabled in production defaults.
+  bool fail_submit{false};
+  bool fail_pop{false};
+  bool fail_complete{false};
+  std::chrono::milliseconds shutdown_bound{1000};
 };
 
 struct SchedulerMetrics {

@@ -190,6 +190,10 @@ Auditor: Agent B
 Verdict: pending
 Findings: pending
 Commands: pending
+Implementation update: Agent A fixed async test ownership by capturing copied LookupRequest values per thread, exposed RequestPath scheduler metrics, and added bounded parameterized RequestPath tests for one-shot Submit, Pop, and Complete failures. Production defaults remain unchanged; injected completion failure now releases its active reservation so a retry cannot inherit stale inflight state.
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|TieredStore|Policy)'; cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread; cmake --build build-tsan -j2; setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -R 'KvCache(RequestPath|Policy)'
+Test result: Debug RequestPath 10/10 passed; TSAN RequestPath 10/10 passed with setarch; no TSAN race reports. Each failure test used 2-second future waits, asserted the expected internal error, verified scheduler pending/inflight bytes returned to zero, and verified a later retry succeeded.
+Residual risks: failure hooks are one-shot mutable configuration and are intended only for deterministic tests; no independent Agent B audit has been performed, and synchronous filesystem shutdown remains bounded only by the configured operation deadline.
 Residual risks: pending
 ```
 
@@ -776,39 +780,135 @@ Residual risks: P9.3，Owner: Agent A；仅在实际 capability probe 失败并�
 - [x] 为索引更新、驱逐和并发查询定义一致性
 - [x] benchmark 不同 prefix 长度、并发度和对象规模
 
-### [~] P7.3 内存/磁盘分级状态机
+### [x] P7.3 内存/磁盘分级状态机
 
-- [ ] 定义 resident/loading/evicting/disk-only/failed 状态与合法转换
-- [ ] 实现内存 slab/pool、预算、碎片统计和高低水位
-- [ ] 实现磁盘 chunk store、空间配额、回收和校验
-- [ ] 实现 memory->disk 降级和 disk->memory 提升
-- [ ] 合并同一对象并发 load，等待者可超时/取消
-- [ ] 迁移期间 pin 活跃对象，防止 use-after-free 或重复驱逐
-- [ ] 对磁盘满、短读、checksum 错误、取消和进程重启增加测试
+- [x] 定义 resident/loading/evicting/disk-only/failed 状态与合法转换
+- [x] 实现内存 slab/pool、预算、碎片统计和高低水位
+- [x] 实现磁盘 chunk store、空间配额、回收和校验
+- [x] 实现 memory->disk 降级和 disk->memory 提升
+- [x] 合并同一对象并发 load，等待者可超时/取消
+- [x] 迁移期间 pin 活跃对象，防止 use-after-free 或重复驱逐
+- [x] 对磁盘满、短读、checksum 错误、取消和进程重启增加测试
 
-### [~] P7.4 决策与调度
+### [x] P7.4 决策与调度
 
-- [~] 收集 recency、frequency、size、load cost、recompute cost 和 reuse distance
-- [~] 建立可解释准入分数，首版基线可采用 cost-aware LRU/GDSF
-- [~] 区分 prefill 热对象、decode 活跃对象和低复用对象
-- [~] 调度 load/match/evict 队列，设置并发度、优先级和 I/O 配额
-- [~] 在 deadline 前预计无法加载时快速 miss 并允许推理端重算
-- [~] 防止大对象扫描、cache pollution 和 tenant 饥饿
-- [~] 支持策略参数配置和运行指标，不在线上热路径同步训练策略
+- [x] 收集 recency、frequency、size、load cost、recompute cost 和 reuse distance
+- [x] 建立可解释准入分数，首版基线可采用 cost-aware LRU/GDSF
+- [x] 区分 prefill 热对象、decode 活跃对象和低复用对象
+- [x] 调度 load/match/evict 队列，设置并发度、优先级和 I/O 配额
+- [x] 在 deadline 前预计无法加载时快速 miss 并允许推理端重算
+- [x] 防止大对象扫描、cache pollution 和 tenant 饥饿
+- [x] 支持策略参数配置和运行指标，不在线上热路径同步训练策略
 
 验收：策略决策可由指标解释；在基准 trace 上优于纯 LRU 基线，且尾延迟无不可接受回归。
 
-### [ ] P7.5 请求到达时的内存快取路径
+### [~] P7.5 请求到达时的内存快取路径
 
-- [ ] 实现单次 lookup 返回 resident handle，避免额外 value copy
-- [ ] 对命中 prefix 只调度缺失 token/layer 的计算或加载
-- [ ] 合并相同 prefix 的并发 miss，防止重复磁盘 I/O/重算
-- [ ] 支持 request priority、deadline 和取消传播
-- [ ] 记录 exact/prefix/memory/disk/miss/coalesced 命中分类
+- [x] 实现单次 lookup 返回 resident handle，避免额外 value copy
+- [x] 对命中 prefix 只调度缺失 token/layer 的计算或加载
+- [x] 合并相同 prefix 的并发 miss，防止重复磁盘 I/O/重算
+- [x] 支持 request priority、deadline 和取消传播
+- [x] 记录 exact/prefix/memory/disk/miss/coalesced 命中分类
 
 验收：resident hit 不触发磁盘 I/O；并发相同请求只产生一次 load；handle 生命周期覆盖推理消费。
 
 工作记录：
+
+```text
+Task ID: P7.5
+Owner: Agent A
+Dependencies: P7.2, P7.3, P7.4
+Current repair scope: Agent A addressing P7.5 failure injection and async request ownership: copied per-thread LookupRequest values, deterministic one-shot scheduler Submit/Pop/Complete failures, exactly-once future completion and retry/counter regression tests. Independent follow-up audit remains required; keep [~].
+Current flaky-test repair: Agent A; dependencies P7.2, P7.3, P7.4 and existing RequestPath/SchedulerState APIs. Add a private test-only worker gate so two distinct operations are queued before the single fail_pop is consumed; preserve production Pop-error draining. Acceptance: both queued requests return kInternal, retries on the same RequestPath succeed, pending/inflight bytes are zero after failure and retries, and the filtered Debug/TSAN test runs at least five times where feasible. Status remains [~]; independent audit pending, no audit pass claimed.
+Changed files: include/kvstore/kvcache/request_path.hpp, src/kvcache/request_path.cpp, tests/unit/kvcache_request_path_test.cpp, todolist/todolist.md
+Commands: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON; cmake --build build -j2; filtered ctest x5; cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread; cmake --build build-tsan -j2; setarch "$(uname -m)" -R filtered ctest x5
+Test result: Debug 5/5 and TSAN 5/5 passed; no TSAN race reports. The test now barriers on SchedulerState().pending == 2 before releasing the worker, asserts both single-Pop-failure results are kInternal, verifies both retries succeed, and checks pending/inflight bytes are zero after each phase.
+Audit round: 11
+Auditor: Agent B
+Verdict: fail
+Findings: high `src/kvcache/request_path.cpp:26-28` started `worker_` during member initialization, allowing the worker to access `worker_paused_for_test_` and synchronization state before construction completed; confirmed RequestPath constructor race.
+Commands: pending remediation verification; required Debug full relevant tests and repeated setarch TSAN RequestPath failure suite
+Residual risks: Agent A moved worker startup into the constructor body after all members are initialized; P7.5 remains [~] and no audit pass is claimed. Independent follow-up audit required.
+Remediation update: Agent A moved thread startup from the initializer list to the constructor body and explicitly initializes `worker_paused_for_test_` before starting the worker. API and tests are preserved.
+Remediation evidence: `cmake --build build -j2` passed; the relevant Debug ctest invocation reached 41/50 tests before the command timeout in the existing long-running coalesced disk-read case, so full relevant Debug completion remains pending. `cmake --build build-tsan -j2` passed; `setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure --repeat until-fail:5 -R 'KvCacheRequestPath(SchedulerFailureTest|RequestPathTest\\.(PopFailureDrainsDistinctPendingOperationsAndRetrySucceeds|CompleteFailureIsSharedByCoalescedWaitersAndRetrySucceeds))'` passed all three failure variants for five repetitions (15/15), with no TSAN reports.
+Scope: request-path lookup handle、prefix missing ranges、相同请求合并、priority/deadline/cancel 和分类指标；接入 MatchIndex/TieredStore/Scheduler
+Implementation status: in progress; Agent A remediation implementation complete, pending independent Agent B audit
+Changed files: CMakeLists.txt, include/kvstore/kvcache/policy.hpp, src/kvcache/policy.cpp, include/kvstore/kvcache/request_path.hpp, src/kvcache/request_path.cpp, tests/unit/kvcache_request_path_test.cpp, todolist/todolist.md
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'
+Test result: build passed; focused KVCache tests 38/38 passed. Comprehensive P7.5 behavioral tests and independent audit remain pending.
+Round 9 update: Added bounded shutdown race, distinct-operation Pop-drain, and coalesced Complete-failure tests; P7.5 remains [~] pending Agent B audit.
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: request error path accessed Result value unsafely; coalesced waiters were not cancellation/deadline aware; priority and scheduler were bypassed; metrics semantics and tests were incomplete
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R KvCacheRequestPathTest
+Residual risks: entered remediation and round 2
+
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: scheduler completion is not exception/cancellation safe; prefix missing ranges are ignored; scheduler estimates and concurrent priority behavior are superficial; coalescing key and overlapping metric semantics remain unsafe; behavioral tests are absent
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCacheRequestPathTest|KvCachePolicySchedulerTest'
+Residual risks: P7.5 remains incomplete; Agent A must implement true range loading, safe scheduler lifecycle, precise coalescing/classification semantics, and comprehensive tests
+Decisions: user accepted StatusCode::kDeadlineExceeded and TieredStore range-load extension; metrics use separate match/storage dimensions; cancellation is waiter-local and shared operation cancels only after its last waiter leaves
+Audit round: 3
+Auditor: Agent B
+Verdict: fail
+Findings: range handle metadata is invalid for chunk-intersecting partial tensors; coalescing ignores ranges and waiter attributes; scheduler is synchronous and lacks safe task ownership/completion; cancellation/last-waiter propagation is incomplete; behavioral request-path tests are absent
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'
+Residual risks: redesign required before round 4: preserve source addressing for range handles or introduce an explicit range view, use range-aware operation keys and waiter registry, add RAII scheduler task ownership, and add behavioral tests
+Audit round: 5
+Auditor: Agent B
+Verdict: fail
+Findings: prefix worker loads the matched source object and does not invoke LoadRanges; shutdown can block on active max-deadline load; active last-waiter cancellation and scheduler completion failure recovery are unproven; coalesced priority policy and core concurrent behavior lack tests
+Commands: cmake --build build -j; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Policy|TieredStore)'
+Residual risks: semantic clarification required: missing prefix suffix is recompute work and cannot be loaded from the shorter source object; LoadRanges applies only to ranges within the matched source object. Then add bounded operation deadline/shutdown, completion recovery, priority policy, and concurrency tests
+Audit round: 8
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: medium shared operation bound may retain short-deadline work; synchronous filesystem calls cannot be interrupted and Shutdown joins; scheduler failure injection remains untested; timing-based concurrency tests may vary; range view requires callers to interpret physical indices explicitly
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'
+Residual risks: Agent A to add scheduler Submit/Pop/Complete failure tests, document blocked filesystem shutdown acceptance, run ASAN/UBSAN/TSAN focused tests, and reconcile P7.5 checkboxes/evidence; P9.2/P10.1 risks remain registered
+Validation update: ASAN/UBSAN focused 44/44 passed; TSAN RequestPath 6/7 passed and LastWaiterCancelsAndShutdownIsRepeatable exposed a test-side race from reassigning a shared stop_token while Lookup reads it (tests/unit/kvcache_request_path_test.cpp:222); P7.5 remains [~] pending race fix and re-audit
+
+Implementation update: Agent A implemented `TieredStore::LoadRanges` with manifest/range validation and physical chunk-aligned selection; added focused range-loading regression coverage. Pending Agent B audit.
+Changed files: src/kvcache/tiered_store.cpp, tests/unit/kvcache_tiered_store_test.cpp
+
+Remediation update: Agent A preserved the source KVD1 manifest for range handles, added `TensorRangeView` with requested ranges and physical chunk indices, and made request coalescing keys range-aware.
+Changed files: include/kvstore/kvcache/tiered_store.hpp, src/kvcache/tiered_store.cpp, src/kvcache/request_path.cpp, tests/unit/kvcache_tiered_store_test.cpp
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(TieredStore|RequestPath)'
+Test result: build passed; focused KVCache tests 23/23 passed
+Audit round: 4
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending
+
+Implementation update: Agent A added source-contained LoadRanges selection, operation deadlines with bounded shutdown cancellation, and max-priority/earliest-deadline waiter aggregation. Existing focused tests pass; requested concurrent/failure tests remain outstanding.
+Changed files: include/kvstore/kvcache/policy.hpp, include/kvstore/kvcache/request_path.hpp, src/kvcache/request_path.cpp, todolist/todolist.md
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|TieredStore|Policy)'
+Test result: build passed; focused KVCache tests 32/32 passed
+Audit round: 5 follow-up
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit; substantive concurrency, shutdown, scheduler failure and coalescing tests still required
+Commands: pending
+Residual risks: underlying TieredStore calls remain synchronous; scheduler priority updates are retained in operation state but cannot mutate an already queued scheduler task
+
+P7.5 remediation update: Agent A made coalesced operation priority/deadline immutable after submission. Scheduler requests receive copied owner values; waiter attributes do not aggregate or reprioritize queued work. The shared operation uses an independent bounded load deadline; waiter deadlines remain local. Shutdown requests stop and join the owned worker. Underlying synchronous filesystem calls cannot be interrupted by a stop token, so no hard shutdown completion bound is claimed.
+
+Repair update: Agent A fixed LoadRanges physical offset calculation for each planar K/V plane and updated the range test to expect both intersecting physical chunks.
+Changed files: src/kvcache/tiered_store.cpp, tests/unit/kvcache_tiered_store_test.cpp, todolist/todolist.md
+Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R KvCacheRequestPathTest
+Test result: Debug focused RequestPathTest 7/7 pass; tests cover source-only prefix/recompute plan, disk metrics, coalescing, survivor deadline, last-waiter cancellation, and repeated shutdown.
+Audit round: 6
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending
+```
 
 ```text
 Task ID: P7.1
@@ -908,6 +1008,13 @@ Verdict: pending
 Findings: pending
 Residual risks: none
 
+Audit round: 4-7
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking
+Commands: P7.3 Debug/ASAN+UBSAN/TSAN focused 23/23 each; format-check; git diff --check
+Residual risks: P10.1 allocator fault injection and mixed-size stress; P9.2 concurrent filesystem replacement protection
+
 Task ID: P7.4
 Owner: Agent A
 Dependencies: P7.2, P7.3
@@ -930,6 +1037,13 @@ Verdict: fail
 Findings: high scheduler invokes arbitrary before_activate callback while mutex is held, permitting deadlock；high deadline subtraction can overflow for extreme steady_clock time_points；high Submit compacts tenant metadata before insertion, so allocation failure can leave cursor/queue state changed；medium Pop/Cancel pruning and cursor handling do not prove bounded tenant metadata；medium missing callback/Metrics deadlock regression, extreme deadline, and cleanup tests
 Commands: Agent B static review of round 1 diff/API and focused test evidence
 Residual risks: round 2 findings enter Agent A remediation；P7.4 remains [~]
+
+Audit round: 3
+Auditor: Agent B
+Verdict: pass
+Findings: none
+Commands: Focused Debug/ASAN+UBSAN/TSAN 15/15 each；full Debug 143/143；Release kvcache_policy_benchmark；format-check；git diff --check
+Residual risks: runtime policy/scheduler construction is assigned to P7.5；deterministic trace is not a wall-clock performance claim
 ```
 
 ---
