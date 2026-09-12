@@ -63,6 +63,7 @@ class RequestPath {
   std::unordered_map<std::string, std::shared_ptr<Pending>> pending_;
   LookupMetrics metrics_{};
   std::condition_variable work_cv_;
+  std::condition_variable test_state_cv_;
   bool stopping_{false};
   std::uint64_t next_id_{};
   std::chrono::milliseconds shutdown_bound_{1000};
@@ -70,7 +71,8 @@ class RequestPath {
   bool worker_paused_for_test_{false};
   friend class RequestPathTestPeer;
   void Worker();
-  void Finish(const std::shared_ptr<Pending>& operation, Result<LookupResult> result);
+   void Finish(const std::shared_ptr<Pending>& operation, Result<LookupResult> result);
+  void Complete(const std::shared_ptr<Pending>& operation, Result<LookupResult> result);
   void Leave(const std::shared_ptr<Pending>& operation);
 };
 

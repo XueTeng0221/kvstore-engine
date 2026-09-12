@@ -195,6 +195,52 @@ Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R
 Test result: Debug RequestPath 10/10 passed; TSAN RequestPath 10/10 passed with setarch; no TSAN race reports. Each failure test used 2-second future waits, asserted the expected internal error, verified scheduler pending/inflight bytes returned to zero, and verified a later retry succeeded.
 Residual risks: failure hooks are one-shot mutable configuration and are intended only for deterministic tests; no independent Agent B audit has been performed, and synchronous filesystem shutdown remains bounded only by the configured operation deadline.
 Residual risks: pending
+
+Audit round: 14
+Auditor: Agent B
+Verdict: fail
+Findings: medium tests/unit/kvcache_request_path_test.cpp:208-210 used unbounded polling waits; medium tests/unit/kvcache_request_path_test.cpp:328-329 and 359-360 used timing-based polling without deterministic worker coordination; unused first_promise remained; failure assertions could leave worker/gate state unreleased
+Commands: pending remediation validation
+Residual risks: P7.5 remains [~]; Agent A must validate bounded waits, unconditional cleanup, and Debug/ASAN/TSAN focused plus repeated failure/coalescing tests; no audit pass is claimed
+
+Round 14 remediation update: Agent A replaced all request-path polling sites with a bounded two-second WaitUntil helper, used worker pause/resume for distinct queued operations, added unconditional resume/gate-release guards, removed first_promise, and preserved production code.
+Changed files: tests/unit/kvcache_request_path_test.cpp, todolist/todolist.md
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON && cmake --build build -j2 && ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined && cmake --build build-asan -j2 && ctest --test-dir build-asan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread && cmake --build build-tsan -j2 && setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure --repeat until-fail:5 -R 'KvCacheRequestPathTest\\.(CoalescesDiskReadAndRecordsMetrics|PopFailureDrainsDistinctPendingOperationsAndRetrySucceeds|CompleteFailureIsSharedByCoalescedWaitersAndRetrySucceeds)|OneShotFailures/KvCacheRequestPathSchedulerFailureTest'`
+Test result: Debug focused 50/50 passed in 7.41s; ASAN/UBSAN focused 50/50 passed in 18.01s with no sanitizer reports; TSAN focused 50/50 passed in 28.86s with no race reports; repeated failure/coalescing filter 6/6 test cases passed five times (30 executions) in 1.68s with no TSAN reports. P7.5 remains [~]; independent Agent B audit is still required and no audit pass is claimed.
+
+Audit round: 15
+Auditor: Agent B
+Verdict: fail
+Findings: medium tests/unit/kvcache_request_path_test.cpp still used WaitUntil wall-clock polling for pending/coalescing state; medium explicit ReadGate::Release calls conflicted with RAII ownership; bounded completion waits and unconditional cleanup required remediation.
+Commands: pending remediation validation
+Residual risks: P7.5 remains [~]; Agent A must complete sanitizer and repeated scheduler/coalescing validation. No audit pass is claimed.
+
+Round 15 remediation update: Agent A replaced WaitUntil with RequestPathTestPeer condition-variable acknowledgments observing pending/coalesced transitions under RequestPath::mutex_, removed the unused helper, made resume and gate cleanup idempotent through RAII guards, and retained bounded future waits. The RequestPath state condition variable is notified at pending insertion and coalescing transitions.
+Changed files: include/kvstore/kvcache/request_path.hpp, src/kvcache/request_path.cpp, tests/unit/kvcache_request_path_test.cpp, todolist/todolist.md
+Commands: `cmake --build build -j2 && ctest --test-dir build --output-on-failure -R 'KvCacheRequestPathTest\\.(CoalescesDiskReadAndRecordsMetrics|PopFailureDrainsDistinctPendingOperationsAndRetrySucceeds|CompleteFailureIsSharedByCoalescedWaitersAndRetrySucceeds)|OneShotFailures/KvCacheRequestPathSchedulerFailureTest'`
+Test result: Debug focused remediation subset 6/6 passed in 0.21s. ASAN/UBSAN, TSAN, and repeated scheduler/coalescing runs remain pending; P7.5 stays [~] and no audit pass is claimed.
+
+Audit round: 16
+Auditor: Agent B
+Verdict: fail
+Findings: medium src/kvcache/request_path.cpp:246-256 used a 1ms future.wait_for polling loop; medium completion paths directly called promise.set_value and could race during owner/worker/shutdown/failure handling, with no completion notification contract
+Commands: pending remediation validation
+Residual risks: P7.5 remains [~]; Agent A must validate one-shot completion, cancellation/deadline wakeups, and Debug/ASAN/TSAN focused plus repeated failure/coalescing runs. No audit pass is claimed.
+
+Round 16 remediation update: Agent A added Pending completion state and condition_variable, centralized one-shot promise fulfillment in Complete, and changed Lookup to wait on completion notification with a waiter-local stop_callback and deadline. RequestPath mutex is not held while fulfilling futures; shutdown, worker failure, cancellation, and normal completion notify_all. Agent B round 17 requested; P7.5 remains [~].
+Changed files: include/kvstore/kvcache/request_path.hpp, src/kvcache/request_path.cpp, todolist/todolist.md
+Commands: `cmake --build build -j2 && ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined && cmake --build build-asan -j2 && ctest --test-dir build-asan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread && cmake --build build-tsan -j2 && setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; setarch TSAN filtered failure/coalescing suite `--repeat until-fail:5`
+Test result: Debug focused 52/52 passed; ASAN/UBSAN focused 52/52 passed with no reports; setarch TSAN focused 52/52 passed with no race reports; repeated failure/coalescing suite passed 5/5 for each of 8 filtered cases (40 executions) with no TSAN reports. Agent B round 17 is requested; P7.5 remains [~] and no audit pass is claimed.
+
+Audit round: 13
+Auditor: Agent B
+Verdict: fail
+Findings: medium tests still used timing/polling and a filesystem gate for coalescing determinism; medium LookupResult mixed source-internal loaded ranges with recompute ranges; requested full Debug/ASAN/TSAN validation evidence was pending
+Commands: pending remediation validation
+Residual risks: Agent A must run the requested Debug, ASAN focused, setarch TSAN focused, and five-repeat scheduler-failure validations; independent audit remains required and no audit pass is claimed
+Validation update: Agent A changed CoalescesDiskReadAndRecordsMetrics to pause/resume the RequestPath worker, assert one pending scheduler operation, and release the gate through an unconditional guard; source-internal loaded ranges are now exposed only by TensorRangeView and recompute_ranges contains absent suffixes only.
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON && cmake --build build -j2 && ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined && cmake --build build-asan -j2 && ctest --test-dir build-asan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread && cmake --build build-tsan -j2 && setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'`; repeated setarch TSAN failure/coalescing filter with `--repeat until-fail:5`.
+Test result: Debug focused 50/50 passed (7.06s); ASAN/UBSAN focused 50/50 passed (18.40s); TSAN focused 50/50 passed (28.51s), no race reports; repeated TSAN scheduler/coalescing filter 6/6 test cases passed, each repeated five times (1.64s), no race reports. P7.5 remains [~]; independent Agent B audit is still required and no audit pass is claimed.
 ```
 
 ---
@@ -802,7 +848,7 @@ Residual risks: P9.3，Owner: Agent A；仅在实际 capability probe 失败并�
 
 验收：策略决策可由指标解释；在基准 trace 上优于纯 LRU 基线，且尾延迟无不可接受回归。
 
-### [~] P7.5 请求到达时的内存快取路径
+### [x] P7.5 请求到达时的内存快取路径
 
 - [x] 实现单次 lookup 返回 resident handle，避免额外 value copy
 - [x] 对命中 prefix 只调度缺失 token/layer 的计算或加载
@@ -869,6 +915,12 @@ Verdict: pass-with-risk
 Findings: medium shared operation bound may retain short-deadline work; synchronous filesystem calls cannot be interrupted and Shutdown joins; scheduler failure injection remains untested; timing-based concurrency tests may vary; range view requires callers to interpret physical indices explicitly
 Commands: cmake --build build -j2; ctest --test-dir build --output-on-failure -R 'KvCache(RequestPath|Match|TieredStore|Policy)'
 Residual risks: Agent A to add scheduler Submit/Pop/Complete failure tests, document blocked filesystem shutdown acceptance, run ASAN/UBSAN/TSAN focused tests, and reconcile P7.5 checkboxes/evidence; P9.2/P10.1 risks remain registered
+Audit round: 17
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none
+Commands: Debug focused 52/52; ASAN/UBSAN focused 52/52; TSAN focused 52/52; repeated TSAN failure/coalescing 45 executions passed; git diff --check
+Residual risks: synchronous filesystem calls remain non-interruptible, so Shutdown latency can exceed shutdown_bound_; owner Agent A, tracked for future I/O backend work
 Validation update: ASAN/UBSAN focused 44/44 passed; TSAN RequestPath 6/7 passed and LastWaiterCancelsAndShutdownIsRepeatable exposed a test-side race from reassigning a shared stop_token while Lookup reads it (tests/unit/kvcache_request_path_test.cpp:222); P7.5 remains [~] pending race fix and re-audit
 
 Implementation update: Agent A implemented `TieredStore::LoadRanges` with manifest/range validation and physical chunk-aligned selection; added focused range-loading regression coverage. Pending Agent B audit.

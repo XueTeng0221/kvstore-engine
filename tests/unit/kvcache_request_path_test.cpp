@@ -1,12 +1,14 @@
 #include <gtest/gtest.h>
-#include <array>
-#include <filesystem>
 #include <unistd.h>
+
 #include <algorithm>
-#include <thread>
+#include <array>
 #include <condition_variable>
-#include <mutex>
+#include <filesystem>
 #include <future>
+#include <mutex>
+#include <thread>
+
 #include "kvstore/kvcache/request_path.hpp"
 
 namespace kvstore::kvcache {
@@ -22,6 +24,16 @@ class RequestPathTestPeer {
       path.worker_paused_for_test_ = false;
     }
     path.work_cv_.notify_one();
+  }
+  static bool WaitPending(RequestPath& path, std::size_t count) {
+    std::unique_lock lock(path.mutex_);
+    return path.test_state_cv_.wait_for(lock, std::chrono::seconds(2),
+                                        [&] { return path.pending_.size() == count; });
+  }
+  static bool WaitCoalesced(RequestPath& path, std::uint64_t count) {
+    std::unique_lock lock(path.mutex_);
+    return path.test_state_cv_.wait_for(lock, std::chrono::seconds(2),
+                                        [&] { return path.metrics_.coalesced >= count; });
   }
 };
 namespace {
@@ -63,6 +75,12 @@ std::filesystem::path Temp() {
   return ::mkdtemp(name.data());
 }
 
+void MakeDiskPrefix(TieredStore& store, MatchIndex& index, Fixture& fixture) {
+  ASSERT_TRUE(store.Put(fixture.manifest, fixture.chunks).ok());
+  ASSERT_TRUE(store.Evict(fixture.manifest).ok());
+  ASSERT_TRUE(index.Insert(fixture.manifest, CanonicalCacheKey(fixture.manifest).value()).ok());
+}
+
 struct ReadGate {
   std::mutex mutex;
   std::condition_variable cv;
@@ -89,12 +107,7 @@ struct ReadGate {
   }
 };
 
-void MakeDiskPrefix(TieredStore& store, MatchIndex& index, Fixture& fixture) {
-  ASSERT_TRUE(store.Put(fixture.manifest, fixture.chunks).ok());
-  ASSERT_TRUE(store.Evict(fixture.manifest).ok());
-  ASSERT_TRUE(index.Insert(fixture.manifest, CanonicalCacheKey(fixture.manifest).value()).ok());
-}
-}
+}  // namespace
 
 TEST(KvCacheRequestPathTest, ExactReturnsResidentSourceAndMetrics) {
   const auto directory = Temp();
@@ -176,13 +189,17 @@ TEST(KvCacheRequestPathTest, PrefixReturnsSourceAndDeterministicRecomputePlan) {
   source.chunk_count = 1;
   source.payload_digest = Sha256(ByteView(fixture.payload.data(), 64)).value();
   std::vector<ByteView> source_chunks{ByteView(fixture.payload.data(), 64)};
-  auto store = TieredStore::Open(Config(directory)); ASSERT_TRUE(store.ok());
+  auto store = TieredStore::Open(Config(directory));
+  ASSERT_TRUE(store.ok());
   auto source_put = store.value()->Put(source, source_chunks);
   ASSERT_TRUE(source_put.ok()) << source_put.status().message();
   ASSERT_TRUE(store.value()->Evict(source).ok());
-  MatchIndex index; ASSERT_TRUE(index.Insert(source, CanonicalCacheKey(source).value()).ok());
+  MatchIndex index;
+  ASSERT_TRUE(index.Insert(source, CanonicalCacheKey(source).value()).ok());
   RequestPath path(index, *store.value());
-  LookupRequest request; request.query = fixture.manifest; request.token_ids = {1, 2, 3, 4};
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
   request.prefix_lengths = {2};
   auto result = path.Lookup(request);
   ASSERT_TRUE(result.ok()) << result.status().message();
@@ -190,61 +207,182 @@ TEST(KvCacheRequestPathTest, PrefixReturnsSourceAndDeterministicRecomputePlan) {
   ASSERT_EQ(result.value().recompute_ranges.size(), 1U);
   EXPECT_EQ(result.value().recompute_ranges[0], (TensorRange{2, 4, 0, 1}));
   EXPECT_EQ(result.value().storage_kind, StorageKind::kDisk);
-  EXPECT_EQ(path.Metrics().prefix, 1U); EXPECT_EQ(path.Metrics().disk, 1U);
-  path.Shutdown(); std::filesystem::remove_all(directory);
+  EXPECT_EQ(path.Metrics().prefix, 1U);
+  EXPECT_EQ(path.Metrics().disk, 1U);
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 TEST(KvCacheRequestPathTest, CoalescesDiskReadAndRecordsMetrics) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate;
-  auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok());
-  MatchIndex index; MakeDiskPrefix(*store.value(), index, fixture);
-  RequestPath path(index, *store.value()); LookupRequest request;
-  request.query = fixture.manifest; request.token_ids = {1, 2, 3, 4};
-  std::promise<Result<LookupResult>> first_promise;
+  const auto directory = Temp();
+  Fixture fixture;
+  auto config = Config(directory);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  RequestPath path(index, *store.value());
+  RequestPathTestPeer::Pause(path);
+  struct ResumeGuard {
+    RequestPath& path;
+    bool resumed{};
+    void Resume() {
+      if (!resumed) {
+        RequestPathTestPeer::Resume(path);
+        resumed = true;
+      }
+    }
+    ~ResumeGuard() { Resume(); }
+  } guard{path};
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
   auto first = std::async(std::launch::async, [&, request] { return path.Lookup(request); });
-  ASSERT_TRUE(gate.WaitEntered());
+  ASSERT_TRUE(RequestPathTestPeer::WaitPending(path, 1));
   auto second = std::async(std::launch::async, [&, request] { return path.Lookup(request); });
-  for (int attempt = 0; attempt < 200 && path.Metrics().coalesced < 1; ++attempt)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  ASSERT_TRUE(RequestPathTestPeer::WaitCoalesced(path, 1));
   ASSERT_EQ(path.Metrics().coalesced, 1U);
-  gate.Release();
+  guard.Resume();
   ASSERT_TRUE(first.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
   ASSERT_TRUE(second.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-  EXPECT_TRUE(first.get().ok()); EXPECT_TRUE(second.get().ok());
-  EXPECT_EQ(path.Metrics().coalesced, 1U); EXPECT_EQ(path.Metrics().disk, 2U);
-  path.Shutdown(); std::filesystem::remove_all(directory);
+  EXPECT_TRUE(first.get().ok());
+  EXPECT_TRUE(second.get().ok());
+  EXPECT_EQ(path.Metrics().coalesced, 1U);
+  EXPECT_EQ(path.Metrics().disk, 2U);
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
+}
+
+TEST(KvCacheRequestPathTest, CancellationWakesUnlimitedWaiterWithoutCancellingPeer) {
+  const auto directory = Temp();
+  Fixture fixture;
+  auto store = TieredStore::Open(Config(directory));
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  RequestPath path(index, *store.value());
+  RequestPathTestPeer::Pause(path);
+  std::stop_source stop;
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
+  auto cancelled_request = request;
+  cancelled_request.cancel = stop.get_token();
+  std::future<Result<LookupResult>> cancelled, peer;
+  // Shutdown runs before async future destruction, including assertion failures.
+  struct ShutdownGuard {
+    RequestPath& path;
+    ~ShutdownGuard() { path.Shutdown(); }
+  } guard{path};
+  cancelled = std::async(std::launch::async,
+                         [&path, cancelled_request] { return path.Lookup(cancelled_request); });
+  ASSERT_TRUE(RequestPathTestPeer::WaitPending(path, 1));
+  peer = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
+  ASSERT_TRUE(RequestPathTestPeer::WaitCoalesced(path, 1));
+  stop.request_stop();
+  ASSERT_EQ(cancelled.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_EQ(cancelled.get().status().code(), StatusCode::kCancelled);
+  EXPECT_EQ(peer.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+  EXPECT_EQ(path.SchedulerState().pending, 1U);
+  RequestPathTestPeer::Resume(path);
+  ASSERT_EQ(peer.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_TRUE(peer.get().ok());
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
+}
+
+TEST(KvCacheRequestPathTest, ShutdownNotifiesAllPausedWaiters) {
+  const auto directory = Temp();
+  Fixture fixture;
+  auto store = TieredStore::Open(Config(directory));
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  RequestPath path(index, *store.value());
+  RequestPathTestPeer::Pause(path);
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
+  std::future<Result<LookupResult>> first, second;
+  struct ShutdownGuard {
+    RequestPath& path;
+    ~ShutdownGuard() { path.Shutdown(); }
+  } guard{path};
+  first = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
+  ASSERT_TRUE(RequestPathTestPeer::WaitPending(path, 1));
+  second = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
+  ASSERT_TRUE(RequestPathTestPeer::WaitCoalesced(path, 1));
+  path.Shutdown();
+  ASSERT_EQ(first.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  ASSERT_EQ(second.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_EQ(first.get().status().code(), StatusCode::kCancelled);
+  EXPECT_EQ(second.get().status().code(), StatusCode::kCancelled);
+  EXPECT_EQ(path.SchedulerState().pending, 0U);
+  std::filesystem::remove_all(directory);
 }
 
 TEST(KvCacheRequestPathTest, EarlyDeadlineDoesNotCancelLongerWaiter) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate;
-  auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok()); MatchIndex index;
-  MakeDiskPrefix(*store.value(), index, fixture); RequestPath path(index, *store.value());
-  LookupRequest short_request; short_request.query = fixture.manifest; short_request.token_ids = {1,2,3,4};
+  const auto directory = Temp();
+  Fixture fixture;
+  ReadGate gate;
+  auto config = Config(directory);
+  config.io_fault = std::ref(gate);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  RequestPath path(index, *store.value());
+  LookupRequest short_request;
+  short_request.query = fixture.manifest;
+  short_request.token_ids = {1, 2, 3, 4};
   short_request.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
-  LookupRequest long_request = short_request; long_request.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  auto short_waiter = std::async(std::launch::async, [&, short_request] { return path.Lookup(short_request); });
-  ASSERT_TRUE(gate.WaitEntered()); auto long_waiter = std::async(std::launch::async, [&, long_request] { return path.Lookup(long_request); });
+  LookupRequest long_request = short_request;
+  long_request.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto short_waiter =
+      std::async(std::launch::async, [&, short_request] { return path.Lookup(short_request); });
+  ASSERT_TRUE(gate.WaitEntered());
+  auto long_waiter =
+      std::async(std::launch::async, [&, long_request] { return path.Lookup(long_request); });
   EXPECT_EQ(short_waiter.get().status().code(), StatusCode::kDeadlineExceeded);
-  gate.Release(); ASSERT_TRUE(long_waiter.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
-  EXPECT_TRUE(long_waiter.get().ok()); path.Shutdown(); std::filesystem::remove_all(directory);
+  gate.Release();
+  ASSERT_TRUE(long_waiter.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  EXPECT_TRUE(long_waiter.get().ok());
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 TEST(KvCacheRequestPathTest, LastWaiterCancelsAndShutdownIsRepeatable) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate; auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok()); MatchIndex index; MakeDiskPrefix(*store.value(), index, fixture); RequestPath path(index, *store.value());
-  LookupRequest request; request.query = fixture.manifest; request.token_ids = {1,2,3,4};
-  auto waiter = std::async(std::launch::async, [&, request] { return path.Lookup(request); }); ASSERT_TRUE(gate.WaitEntered());
-  std::stop_source stop; stop.request_stop(); auto cancelled_request = request; cancelled_request.cancel = stop.get_token();
-  EXPECT_EQ(path.Lookup(cancelled_request).status().code(), StatusCode::kCancelled); gate.Release();
-  ASSERT_TRUE(waiter.wait_for(std::chrono::seconds(2)) == std::future_status::ready); waiter.get();
-  path.Shutdown(); path.Shutdown(); std::filesystem::remove_all(directory);
+  const auto directory = Temp();
+  Fixture fixture;
+  ReadGate gate;
+  auto config = Config(directory);
+  config.io_fault = std::ref(gate);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  RequestPath path(index, *store.value());
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
+  auto waiter = std::async(std::launch::async, [&, request] { return path.Lookup(request); });
+  ASSERT_TRUE(gate.WaitEntered());
+  std::stop_source stop;
+  stop.request_stop();
+  auto cancelled_request = request;
+  cancelled_request.cancel = stop.get_token();
+  EXPECT_EQ(path.Lookup(cancelled_request).status().code(), StatusCode::kCancelled);
+  gate.Release();
+  ASSERT_TRUE(waiter.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  waiter.get();
+  path.Shutdown();
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 struct SchedulerFailureCase {
   const char* name;
-  bool SchedulerConfig::*flag;
+  bool SchedulerConfig::* flag;
   StatusCode expected;
 };
 
@@ -288,12 +426,19 @@ TEST_P(KvCacheRequestPathSchedulerFailureTest, FailureDoesNotStickAndRetrySuccee
 }
 
 TEST(KvCacheRequestPathTest, ShutdownRacingCompletionCompletesFutureExactlyOnce) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate;
-  auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok());
-  MatchIndex index; MakeDiskPrefix(*store.value(), index, fixture);
+  const auto directory = Temp();
+  Fixture fixture;
+  ReadGate gate;
+  auto config = Config(directory);
+  config.io_fault = std::ref(gate);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
   RequestPath path(index, *store.value());
-  LookupRequest request; request.query = fixture.manifest; request.token_ids = {1,2,3,4};
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
   auto future = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
   ASSERT_TRUE(gate.WaitEntered());
   std::thread shutdown([&path] { path.Shutdown(); });
@@ -309,25 +454,44 @@ TEST(KvCacheRequestPathTest, ShutdownRacingCompletionCompletesFutureExactlyOnce)
 }
 
 TEST(KvCacheRequestPathTest, PopFailureDrainsDistinctPendingOperationsAndRetrySucceeds) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate;
-  auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok());
-  MatchIndex index; MakeDiskPrefix(*store.value(), index, fixture);
-  SchedulerConfig scheduler; scheduler.fail_pop = true;
+  const auto directory = Temp();
+  Fixture fixture;
+  ReadGate gate;
+  auto config = Config(directory);
+  config.io_fault = std::ref(gate);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
+  MakeDiskPrefix(*store.value(), index, fixture);
+  SchedulerConfig scheduler;
+  scheduler.fail_pop = true;
   RequestPath path(index, *store.value(), scheduler);
   RequestPathTestPeer::Pause(path);
-  LookupRequest a; a.query = fixture.manifest; a.token_ids = {1,2,3,4};
-  auto altered = fixture.manifest; altered.model_revision = "v2";
+  struct ResumeGuard {
+    RequestPath& path;
+    bool resumed{};
+    void Resume() {
+      if (!resumed) {
+        RequestPathTestPeer::Resume(path);
+        resumed = true;
+      }
+    }
+    ~ResumeGuard() { Resume(); }
+  } guard{path};
+  LookupRequest a;
+  a.query = fixture.manifest;
+  a.token_ids = {1, 2, 3, 4};
+  auto altered = fixture.manifest;
+  altered.model_revision = "v2";
   ASSERT_TRUE(store.value()->Put(altered, fixture.chunks).ok());
   ASSERT_TRUE(store.value()->Evict(altered).ok());
   ASSERT_TRUE(index.Insert(altered, CanonicalCacheKey(altered).value()).ok());
-  LookupRequest b = a; b.query = altered;
+  LookupRequest b = a;
+  b.query = altered;
   auto first = std::async(std::launch::async, [&path, a] { return path.Lookup(a); });
   auto second = std::async(std::launch::async, [&path, b] { return path.Lookup(b); });
-  for (int attempt = 0; attempt < 200 && path.SchedulerState().pending < 2; ++attempt)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  ASSERT_EQ(path.SchedulerState().pending, 2U);
-  RequestPathTestPeer::Resume(path);
+  ASSERT_TRUE(RequestPathTestPeer::WaitPending(path, 2));
+  guard.Resume();
   gate.Release();
   ASSERT_EQ(first.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   ASSERT_EQ(second.wait_for(std::chrono::seconds(2)), std::future_status::ready);
@@ -341,39 +505,57 @@ TEST(KvCacheRequestPathTest, PopFailureDrainsDistinctPendingOperationsAndRetrySu
   ASSERT_EQ(retry_b.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   EXPECT_TRUE(retry_a.get().ok());
   EXPECT_TRUE(retry_b.get().ok());
-  path.Shutdown(); std::filesystem::remove_all(directory);
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 TEST(KvCacheRequestPathTest, CompleteFailureIsSharedByCoalescedWaitersAndRetrySucceeds) {
-  const auto directory = Temp(); Fixture fixture; ReadGate gate;
-  auto config = Config(directory); config.io_fault = std::ref(gate);
-  auto store = TieredStore::Open(config); ASSERT_TRUE(store.ok()); MatchIndex index;
+  const auto directory = Temp();
+  Fixture fixture;
+  ReadGate gate;
+  auto config = Config(directory);
+  config.io_fault = std::ref(gate);
+  auto store = TieredStore::Open(config);
+  ASSERT_TRUE(store.ok());
+  MatchIndex index;
   MakeDiskPrefix(*store.value(), index, fixture);
-  SchedulerConfig scheduler; scheduler.fail_complete = true;
-  RequestPath path(index, *store.value(), scheduler); LookupRequest request;
-  request.query = fixture.manifest; request.token_ids = {1,2,3,4};
+  SchedulerConfig scheduler;
+  scheduler.fail_complete = true;
+  RequestPath path(index, *store.value(), scheduler);
+  LookupRequest request;
+  request.query = fixture.manifest;
+  request.token_ids = {1, 2, 3, 4};
   auto first = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
   ASSERT_TRUE(gate.WaitEntered());
   auto second = std::async(std::launch::async, [&path, request] { return path.Lookup(request); });
-  for (int attempt = 0; attempt < 200 && path.Metrics().coalesced == 0; ++attempt)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  ASSERT_EQ(path.Metrics().coalesced, 1U);
-  gate.Release();
+  struct GateGuard {
+    ReadGate& gate;
+    bool released{};
+    void Release() {
+      if (!released) {
+        gate.Release();
+        released = true;
+      }
+    }
+    ~GateGuard() { Release(); }
+  } gate_guard{gate};
+  ASSERT_TRUE(RequestPathTestPeer::WaitCoalesced(path, 1));
+  gate_guard.Release();
   ASSERT_EQ(first.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   ASSERT_EQ(second.wait_for(std::chrono::seconds(2)), std::future_status::ready);
   EXPECT_EQ(first.get().status().code(), StatusCode::kInternal);
   EXPECT_EQ(second.get().status().code(), StatusCode::kInternal);
   EXPECT_TRUE(path.Lookup(request).ok());
-  path.Shutdown(); std::filesystem::remove_all(directory);
+  path.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 INSTANTIATE_TEST_SUITE_P(
     OneShotFailures, KvCacheRequestPathSchedulerFailureTest,
-    ::testing::Values(SchedulerFailureCase{"fail_submit", &SchedulerConfig::fail_submit,
-                                           StatusCode::kInternal},
-                      SchedulerFailureCase{"fail_pop", &SchedulerConfig::fail_pop,
-                                           StatusCode::kInternal},
-                      SchedulerFailureCase{"fail_complete", &SchedulerConfig::fail_complete,
-                                           StatusCode::kInternal}),
+    ::testing::Values(
+        SchedulerFailureCase{"fail_submit", &SchedulerConfig::fail_submit, StatusCode::kInternal},
+        SchedulerFailureCase{"fail_pop", &SchedulerConfig::fail_pop, StatusCode::kInternal},
+        SchedulerFailureCase{"fail_complete", &SchedulerConfig::fail_complete,
+                             StatusCode::kInternal}),
     [](const ::testing::TestParamInfo<SchedulerFailureCase>& info) { return info.param.name; });
-}
+}  // namespace kvstore::kvcache

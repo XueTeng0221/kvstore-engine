@@ -24,7 +24,8 @@ collision from becoming a cross-model or cross-tenant hit.
 
 A hit returns the canonical object key, hit token count, layer range, all immutable object chunk
 indices, and the missing half-open token range `[hit_tokens, query_tokens)`. Exact hits have no missing
-range. P7.5 combines this logical result with a resident handle and tier state.
+range. P7.5 exposes source-internal loaded ranges through `TensorRangeView`; `LookupResult::recompute_ranges`
+contains only absent suffix ranges that require recomputation.
 
 Insert, erase, and lookup are linearized by one shared mutex. Readers may run concurrently. A reader
 racing erase observes either the complete entry before erase or `NOT_FOUND` after erase; no partial

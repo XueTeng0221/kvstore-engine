@@ -12,6 +12,9 @@ struct RequestPath::Pending {
         key(std::move(operation_key)) {}
   std::promise<Result<LookupResult>> promise;
   std::shared_future<Result<LookupResult>> future{promise.get_future().share()};
+  std::mutex completion_mutex;
+  std::condition_variable completion_cv;
+  bool completed{};
   std::size_t waiters{};
   std::uint64_t scheduler_id{};
   std::stop_source stop;
@@ -43,7 +46,7 @@ void RequestPath::Shutdown() noexcept {
     (void)key;
     operation->stop.request_stop();
     (void)scheduler_.Cancel(operation->scheduler_id);
-    operation->promise.set_value(Status{StatusCode::kCancelled, "request path stopped"});
+    Complete(operation, Status{StatusCode::kCancelled, "request path stopped"});
   }
   work_cv_.notify_all();
   if (worker_.joinable()) worker_.join();
@@ -56,7 +59,18 @@ void RequestPath::Finish(const std::shared_ptr<Pending>& operation, Result<Looku
     if (found == pending_.end() || found->second != operation) return;
     pending_.erase(found);
   }
-  operation->promise.set_value(std::move(result));
+  Complete(operation, std::move(result));
+}
+
+void RequestPath::Complete(const std::shared_ptr<Pending>& operation,
+                           Result<LookupResult> result) {
+  {
+    std::lock_guard lock(operation->completion_mutex);
+    if (operation->completed) return;
+    operation->promise.set_value(std::move(result));
+    operation->completed = true;
+  }
+  operation->completion_cv.notify_all();
 }
 
 void RequestPath::Leave(const std::shared_ptr<Pending>& operation) {
@@ -111,7 +125,7 @@ void RequestPath::Worker() {
         (void)key;
         (void)scheduler_.Cancel(candidate->scheduler_id);
         candidate->stop.request_stop();
-        candidate->promise.set_value(task.status());
+        Complete(candidate, task.status());
       }
       continue;
     }
@@ -159,13 +173,11 @@ void RequestPath::Worker() {
         if (!loaded.ok()) {
           result = loaded.status();
         } else {
-          auto ranges = std::move(recompute_ranges);
-          ranges.insert(ranges.end(), load_ranges.begin(), load_ranges.end());
-           result = LookupResult{std::move(match), std::move(loaded.value()),
-                                ranges.empty() ? MatchKind::kExact : MatchKind::kPrefix,
-                                state.value() == TierState::kResident ? StorageKind::kMemory
-                                                                      : StorageKind::kDisk,
-                                std::move(ranges)};
+            result = LookupResult{std::move(match), std::move(loaded.value()),
+                                 recompute_ranges.empty() ? MatchKind::kExact : MatchKind::kPrefix,
+                                 state.value() == TierState::kResident ? StorageKind::kMemory
+                                                                       : StorageKind::kDisk,
+                                 std::move(recompute_ranges)};
         }
       }
     } catch (const std::bad_alloc&) {
@@ -207,6 +219,7 @@ Result<LookupResult> RequestPath::Lookup(const LookupRequest& request) {
     if (found != pending_.end()) {
       operation = found->second;
       ++metrics_.coalesced;
+      test_state_cv_.notify_all();
     } else {
       if (next_id_ == std::numeric_limits<std::uint64_t>::max())
         return Status{StatusCode::kLimitExceeded, "lookup operation IDs exhausted"};
@@ -217,6 +230,7 @@ Result<LookupResult> RequestPath::Lookup(const LookupRequest& request) {
                                               request.priority, std::move(match.value()), key);
       operation->scheduler_id = ++next_id_;
       pending_.emplace(key, operation);
+      test_state_cv_.notify_all();
       LoadRequest task;
       task.id = operation->scheduler_id;
       task.key = key;
@@ -241,32 +255,41 @@ Result<LookupResult> RequestPath::Lookup(const LookupRequest& request) {
     const std::shared_ptr<Pending>& operation;
     ~Waiter() { path.Leave(operation); }
   } waiter{*this, operation};
-  if (!submission.ok()) operation->promise.set_value(submission);
+  if (!submission.ok()) Complete(operation, submission);
   work_cv_.notify_one();
-  for (;;) {
-    Result<LookupResult> result = Status{StatusCode::kCancelled, "lookup cancelled"};
-    if (request.cancel.stop_requested()) {
-      // The waiter guard cancels the shared operation only when nobody remains.
-    } else if (std::chrono::steady_clock::now() >= request.deadline) {
-      result = Status{StatusCode::kDeadlineExceeded, "lookup deadline exceeded"};
-    } else if (operation->future.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
-      result = operation->future.get();
-    } else {
-      continue;
-    }
-    {
-      std::lock_guard lock(mutex_);
-      if (result.ok()) {
-        if (result.value().match_kind == MatchKind::kExact) ++metrics_.exact;
-        else ++metrics_.prefix;
-        if (result.value().storage_kind == StorageKind::kMemory) ++metrics_.memory;
-        else ++metrics_.disk;
-      } else {
-        ++metrics_.miss;
-      }
-    }
-    return result;
+  std::stop_callback cancellation(request.cancel, [&] {
+    // Serialize with the predicate check so cancellation cannot lose a wakeup.
+    std::lock_guard lock(operation->completion_mutex);
+    operation->completion_cv.notify_all();
+  });
+  {
+    std::unique_lock lock(operation->completion_mutex);
+    const auto ready = [&] { return operation->completed || request.cancel.stop_requested(); };
+    if (request.deadline == std::chrono::steady_clock::time_point::max())
+      operation->completion_cv.wait(lock, ready);
+    else
+      operation->completion_cv.wait_until(lock, request.deadline, ready);
   }
+  Result<LookupResult> result = Status{StatusCode::kCancelled, "lookup cancelled"};
+  if (request.cancel.stop_requested()) {
+    // The waiter guard cancels the shared operation only when nobody remains.
+  } else if (std::chrono::steady_clock::now() >= request.deadline) {
+    result = Status{StatusCode::kDeadlineExceeded, "lookup deadline exceeded"};
+  } else {
+    result = operation->future.get();
+  }
+  {
+    std::lock_guard lock(mutex_);
+    if (result.ok()) {
+      if (result.value().match_kind == MatchKind::kExact) ++metrics_.exact;
+      else ++metrics_.prefix;
+      if (result.value().storage_kind == StorageKind::kMemory) ++metrics_.memory;
+      else ++metrics_.disk;
+    } else {
+      ++metrics_.miss;
+    }
+  }
+  return result;
 }
 
 LookupMetrics RequestPath::Metrics() const {
