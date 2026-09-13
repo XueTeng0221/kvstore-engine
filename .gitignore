@@ -1,7 +1,9 @@
 build/
 build-*/
+.venv/
 .cache/
 compile_commands.json
 Testing/
 *.profraw
 *.profdata
+artifacts/*

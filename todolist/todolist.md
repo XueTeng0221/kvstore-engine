@@ -1177,7 +1177,15 @@ Test result: daemon enabled and host API responsive. GPU smoke could not start: 
 Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if needed, resolve approved registry/proxy access and rerun GPU container smoke before framework acceptance. Do not claim GPU readiness or M7 completion.
 ```
 
-### [ ] P8.2 vLLM adapter
+### [~] P8.2 vLLM adapter
+
+Runtime implementation work record (2026-09-13):
+Owner: Agent A (current implementation context); independent audit: parent, not this agent.
+Dependencies: P8.1 accepted round 3; local Qwen2.5-0.5B revision 060db6499f32faf8b98477b0a26969ef7d8b9987; RTX 4060 CUDA.
+Scope: isolate vLLM 0.29.0 and SGLang 0.5.19 environments; inspect installed upstream APIs; implement genuine KVConnectorBase_V1/HiCache plugins and a core bridge; exercise real CUDA pinned-buffer/event ownership and sequential model E2E (miss, partial/full external hit, cancellation, timeout, restart). Add reproducible runtime requirements, tests, CMake registration and evidence. Preserve existing uncommitted adapters. P8.2/P8.3 remain [~]; no audit verdict is authored here.
+Acceptance: actual framework callbacks must transfer this project's cached tensors; built-in caching or mock tests do not satisfy runtime acceptance. Record exact upstream/hardware failures and incomplete conditions without claiming completion.
+
+Resume inspection (2026-09-13): Owner Agent A (resumed implementation context), dependencies and scope unchanged. No surviving test/server/installer processes; prior uncommitted C++ adapters preserved. `.venv` passes pip check but vLLM metadata is absent; `.venv-vllm` is a partially installed isolated environment. NVIDIA reports RTX 4060 Laptop 8188 MiB, driver 591.86, CUDA 13.1. Real Python plugins and framework E2E are not yet present. Parent independent audit remains required.
 
 - [ ] 固定支持的 vLLM 版本和 KV cache layout
 - [ ] 在 prefill 前查询 exact/prefix match
@@ -1185,7 +1193,7 @@ Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if need
 - [ ] prefill 后异步发布可复用 KV，并在请求取消时清理 reservation
 - [ ] 集成测试覆盖 miss、partial hit、full hit、超时和 server 重启
 
-### [ ] P8.3 SGLang adapter
+### [~] P8.3 SGLang adapter
 
 - [ ] 固定支持的 SGLang 版本和 radix/prefix cache 边界
 - [ ] 映射 SGLang prefix/radix 元数据到 canonical cache key
@@ -1206,7 +1214,31 @@ Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if need
 
 验收：至少一个 vLLM 和一个 SGLang 支持版本通过端到端测试；收益报告可由脚本在记录环境中复现。
 
-工作记录：待开始时填写。
+工作记录：
+```text
+Task ID: P8.2
+Owner: Agent A
+Dependencies: P8.1
+Scope: Qwen2.5-0.5B vLLM 0.29.0 adapter; KVConnectorBase_V1 integration boundary, exact/prefix lookup, publication lifecycle, cancellation and contract tests.
+Status: in progress; real GPU/container validation pending Docker image access.
+Implementation start: Agent A; P8.1 round 3 accepted. Scope limited to include/kvstore/integration/vllm, src/integration/vllm, dedicated tests/docs and CMake registration. Implement serialized Session transport, fixed single-rank full-block CPU staging contract, validated hit injection and cooperatively advanced asynchronous publication with reservation cleanup. Acceptance for this round: executable mock coverage of miss/partial/full hit, deadlines, cancellation, metadata rejection and restart/persistence boundary; no real vLLM/GPU E2E claim. Keep [~] and acceptance boxes unchecked pending independent Agent B audit.
+
+Resource validation: Qwen2.5-0.5B downloaded through `HF_ENDPOINT=https://hf-mirror.com` into `artifacts/models/Qwen2.5-0.5B`; mirror revision `060db6499f32faf8b98477b0a26969ef7d8b9987`, `model.safetensors` 988097824 bytes. `config.json` reports qwen2, 24 layers, BF16, 14 attention heads, 2 KV heads, vocabulary 151936, matching the adapter's fixed 24-layer BF16 block baseline. This is model-resource validation only and does not prove CUDA execution.
+Changed files: src/integration/vllm/adapter.cpp; include/kvstore/integration/vllm/adapter.hpp; tests/integration/vllm/adapter_test.cpp; src/integration/vllm/CMakeLists.txt; tests/integration/vllm/CMakeLists.txt; CMakeLists.txt; artifacts/models/Qwen2.5-0.5B/{config.json,generation_config.json,tokenizer.json,tokenizer_config.json,model.safetensors}
+Commands: `HF_ENDPOINT=https://hf-mirror.com hf download Qwen/Qwen2.5-0.5B --repo-type model --local-dir artifacts/models/Qwen2.5-0.5B --include '*.safetensors' --include '*.safetensors.index.json' --max-workers 4`; `cmake --build build --target kvstore_vllm_tests -j2`; `./build/tests/integration/vllm/kvstore_vllm_tests --gtest_color=no`; `sha256sum artifacts/models/Qwen2.5-0.5B/model.safetensors`; `git diff --check`
+Test result: Qwen resource download completed; safetensors SHA-256 `88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342`. vLLM adapter contract suite 16/16 passed. Real vLLM 0.29.0 runtime, CUDA/pinned staging and GPU E2E remain pending; P8.2 stays [~].
+Virtualenv validation: workspace `.venv` created and populated from Tsinghua PyPI with `safetensors==0.5.3`, `huggingface-hub==0.27.1`, and `transformers==4.48.3`. Local `AutoConfig`/tokenizer loading succeeded and safetensors metadata reports 290 tensors; embedding and Q/K/V shapes are `(151936,896)`, `(896,896)`, `(128,896)`, `(128,896)`. The tokenizer reports 151643 base vocabulary while the model uses padded 151936 embedding rows; this expected distinction is recorded and the adapter validates the model padded vocabulary boundary. PyTorch is not installed, so CPU forward/generation is not claimed. Commands: `.venv/bin/python ... AutoConfig/AutoTokenizer/safe_open`; `cmake --build build --target kvstore_vllm_tests -j2`; `./build/tests/integration/vllm/kvstore_vllm_tests --gtest_color=no`. Result: local model metadata validation passed; vLLM contract tests 16/16 passed. `.venv/` added to `.gitignore`.
+GPU/runtime validation: `.venv` now contains `torch==2.14.0+cu130` from the Tsinghua PyPI mirror; local CUDA smoke reports `cuda_available=True`, one NVIDIA GeForce RTX 4060 Laptop GPU, and Qwen2.5-0.5B CPU/GPU model forward succeeded with logits `(1,4,151936)`, 24 KV layers and first KV shape `(1,2,4,64)`. Docker Hub was unreachable, so `docker.m.daocloud.io/nvidia/cuda:12.4.1-base-ubuntu22.04` was pulled instead (digest `sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95`); container `nvidia-smi` sees the RTX 4060, driver 591.86, CUDA 13.1. This validates GPU plumbing, not vLLM runtime compatibility or adapter CUDA DMA ownership.
+Build remediation: completed missing `RadixMetadata::device` initialization in `tests/unit/sglang_hicache_storage_test.cpp`, removing the `-Werror=missing-field-initializers` blocker. `cmake --build build --target kvstore_unit_tests kvstore_vllm_tests -j2` succeeded; combined SGLang/vLLM acceptance filter passed 18/18. P8.2 remains [~] because actual vLLM 0.29.0 and KVConnectorBase_V1 runtime integration is not installed; P8.3 remains [~] pending independent audit.
+
+Audit round: 1
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: medium real vLLM 0.29.0 KVConnectorBase_V1/runtime and block-manager callback compatibility is not wired; medium CUDA allocator, page-locked host memory, H2D event lifetime and active DMA cancellation are not exercised; low whole-tree build is blocked by unrelated SGLang test missing-field-initializers warning under -Werror.
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON`; `cmake --build build --target kvstore_vllm_tests -j2`; `./build/tests/integration/vllm/kvstore_vllm_tests --gtest_color=no`; `git diff --check`
+Test result: isolated vLLM target and 16/16 tests passed. Tests cover miss/partial/full hit, exact/prefix lookup, metadata and block safety rejection, deadline/cancellation, remote timeout, lost acknowledgement, persistence rehydration, publication cleanup and reconnect lookup. Whole build/test is not claimed because the unrelated SGLang test fails `-Werror=missing-field-initializers`.
+Residual risks: P8.2/P8.4, Owner Agent A: validate actual vLLM 0.29.0 KVConnectorBase_V1, GPU block injection, pinned CPU staging/CUDA event cancellation and performance on Qwen2.5-0.5B. P8.3, Owner Agent A: fix SGLang test warning and obtain independent audit. P10.1 tracks the broader integration matrix. P8.2 remains [~] and acceptance boxes remain unchecked.
+```
 
 ---
 
@@ -1241,7 +1273,22 @@ Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if need
 
 验收：故障注入可通过日志、指标和 trace 定位；敏感 payload 不进入日志。
 
-工作记录：待开始时填写。
+工作记录：
+```text
+Task ID: P8.3
+Owner: Agent A
+Dependencies: P8.1
+Scope: Qwen2.5-0.5B SGLang 0.5.19 adapter; dynamic HiCacheStorage interface_v1/radix metadata mapping, publication lifecycle, fallback and contract tests.
+Status: in progress; real GPU/container validation pending Docker image access.
+
+Implementation round: 1 (Agent A)
+Dependencies: P8.1 accepted round 3 pass-with-risk.
+Scope: framework-independent SGLang 0.5.19 / Qwen2.5-0.5B dynamic HiCacheStorage interface_v1 contract; root-prefix metadata mapping, serialized Session lookup/read/publish/release/abort and bounded timeout/cancel/checksum fallback; standalone mock and contract tests. Only SGLang adapter paths, build registration, scoped tests/docs and this P8.3 record are in scope; no vLLM edits.
+Acceptance: automated miss/partial/full hit, metadata isolation, upload cleanup, timeout, cancellation, checksum and restart contracts. Real Python plugin loading, GPU DMA/radix insertion and SGLang E2E remain explicitly unverified; P8.3 stays [~] pending independent Agent B audit.
+Changed files: CMakeLists.txt; include/kvstore/integration/sglang/hicache_storage.hpp; src/integration/sglang/hicache_storage.cpp; tests/unit/sglang_hicache_storage_test.cpp; docs/p8-sglang-adapter.md; todolist/todolist.md
+Commands: `cmake --build build -j2` (pass); `ctest --test-dir build --output-on-failure -R 'SglangHiCache|IntegrationMockClient'` (existing build: IntegrationMockClient pass); fresh configure/build blocked by pre-existing/unowned `src/integration/vllm/CMakeLists.txt:6` deferred `add_subdirectory` error. No real SGLang/GPU E2E claimed.
+Test result: adapter library compiles in existing build; focused new test could not be registered because fresh configure is blocked by the unrelated vLLM CMake change. Agent B audit required; P8.3 remains [~].
+```
 
 ---
 

@@ -1,0 +1,3 @@
+add_executable(kvstore_vllm_tests adapter_test.cpp)
+target_link_libraries(kvstore_vllm_tests PRIVATE kvstore_vllm_adapter GTest::gtest_main)
+gtest_discover_tests(kvstore_vllm_tests)

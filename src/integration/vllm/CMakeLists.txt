@@ -1,0 +1,2 @@
+add_library(kvstore_vllm_adapter adapter.cpp)
+target_link_libraries(kvstore_vllm_adapter PUBLIC kvstore_integration)

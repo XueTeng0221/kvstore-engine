@@ -121,11 +121,12 @@ target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/in
 target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
 target_link_libraries(kvstore_kvcache PUBLIC kvstore_common kvstore_options)
 
-add_library(kvstore_integration src/integration/protocol.cpp)
+add_library(kvstore_integration src/integration/protocol.cpp src/integration/sglang/hicache_storage.cpp)
 target_include_directories(kvstore_integration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(kvstore_integration PUBLIC kvstore_kvcache kvstore_options kvstore_integration_proto)
 add_executable(kvstore_mock_client src/integration/mock_client.cpp)
 target_link_libraries(kvstore_mock_client PRIVATE kvstore_integration)
+add_subdirectory(src/integration/vllm)
 
 add_library(kvstore_engine_lib
   src/engine/array_engine.cpp
@@ -165,6 +166,7 @@ if(KVSTORE_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
   include(GoogleTest)
+  add_subdirectory(tests/integration/vllm)
   add_test(NAME IntegrationMockClient COMMAND kvstore_mock_client)
 
   add_executable(kvstore_unit_tests
@@ -180,6 +182,7 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/kvcache_policy_test.cpp
     tests/unit/kvcache_request_path_test.cpp
     tests/unit/integration_protocol_test.cpp
+    tests/unit/sglang_hicache_storage_test.cpp
   )
   target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache kvstore_integration GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_unit_tests PRIVATE KVSTORE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
