@@ -43,6 +43,8 @@ class MatchIndex {
 
   [[nodiscard]] Status Insert(const TensorManifest& manifest, const CacheKey& key);
   [[nodiscard]] Status Erase(const TensorManifest& manifest);
+  // Allocation-free rollback for a staged publication; exceptional O(entries) path.
+  void RollbackInsert(const CacheKey& key) noexcept;
   [[nodiscard]] Result<MatchResult> Exact(const TensorManifest& query,
                                           std::span<const std::uint32_t> token_ids) const;
   [[nodiscard]] Result<MatchResult> LongestPrefix(

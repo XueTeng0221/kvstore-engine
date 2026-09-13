@@ -53,8 +53,8 @@ struct ObjectFixture {
     const std::array<std::uint32_t, 4> tokens{1, 2, 3, 4};
     manifest.token_digest = TokenDigest(tokens).value();
     manifest.token_count = tokens.size();
-     manifest.layer_begin = 7;
-     manifest.layer_count = 1;
+    manifest.layer_begin = 7;
+    manifest.layer_count = 1;
     manifest.shape = {2, 1, 4, 2, 4};
     manifest.axis_order = {TensorAxis::kKeyValue, TensorAxis::kLayer, TensorAxis::kToken,
                            TensorAxis::kHead, TensorAxis::kHeadDimension};

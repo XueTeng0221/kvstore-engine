@@ -287,7 +287,13 @@ Status ChunkRegistry::Abort(std::uint64_t reservation_id) try {
     return {StatusCode::kNotFound, "reservation does not exist"};
   }
   pending_bytes_ -= iterator->second.accounted_bytes;
-  reservation_keys_.erase(iterator->second.key.ToString());
+  // Cleanup must not allocate: session destructors abort under memory pressure.
+  for (auto key = reservation_keys_.begin(); key != reservation_keys_.end(); ++key) {
+    if (key->second == reservation_id) {
+      reservation_keys_.erase(key);
+      break;
+    }
+  }
   reservations_.erase(iterator);
   return Status::Ok();
 } catch (const std::bad_alloc&) {

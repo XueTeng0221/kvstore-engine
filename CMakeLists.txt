@@ -65,6 +65,30 @@ set(PICOSHA2_TEST OFF CACHE BOOL "" FORCE)
 set(PICOSHA2_EXAMPLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(picosha2)
 
+# Protobuf 3.21.12 (BSD-3-Clause): generated, interoperable sidecar messages.
+set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(protobuf
+  URL https://codeload.github.com/protocolbuffers/protobuf/tar.gz/refs/tags/v21.12
+  URL_HASH SHA256=22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de
+)
+FetchContent_MakeAvailable(protobuf)
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kvstore_integration_v1.pb.cc ${CMAKE_CURRENT_BINARY_DIR}/kvstore_integration_v1.pb.h
+  COMMAND protobuf::protoc --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+    --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/kvstore_integration_v1.proto
+  DEPENDS protobuf::protoc proto/kvstore_integration_v1.proto
+  VERBATIM)
+add_library(kvstore_integration_proto ${CMAKE_CURRENT_BINARY_DIR}/kvstore_integration_v1.pb.cc)
+target_include_directories(kvstore_integration_proto SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(kvstore_integration_proto PUBLIC protobuf::libprotobuf)
+if(KVSTORE_SANITIZERS)
+  # Instrument generated parsing code without imposing project warnings on it.
+  target_compile_options(kvstore_integration_proto PRIVATE -fsanitize=${_sanitizers} -fno-omit-frame-pointer)
+endif()
+
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.hpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/generated/kvstore/version.hpp
@@ -96,6 +120,12 @@ add_library(kvstore_kvcache
 target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
 target_link_libraries(kvstore_kvcache PUBLIC kvstore_common kvstore_options)
+
+add_library(kvstore_integration src/integration/protocol.cpp)
+target_include_directories(kvstore_integration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(kvstore_integration PUBLIC kvstore_kvcache kvstore_options kvstore_integration_proto)
+add_executable(kvstore_mock_client src/integration/mock_client.cpp)
+target_link_libraries(kvstore_mock_client PRIVATE kvstore_integration)
 
 add_library(kvstore_engine_lib
   src/engine/array_engine.cpp
@@ -135,6 +165,7 @@ if(KVSTORE_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
   include(GoogleTest)
+  add_test(NAME IntegrationMockClient COMMAND kvstore_mock_client)
 
   add_executable(kvstore_unit_tests
     tests/unit/common_test.cpp
@@ -148,8 +179,9 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/kvcache_tiered_store_test.cpp
     tests/unit/kvcache_policy_test.cpp
     tests/unit/kvcache_request_path_test.cpp
+    tests/unit/integration_protocol_test.cpp
   )
-  target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache GTest::gtest_main kvstore_options)
+  target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache kvstore_integration GTest::gtest_main kvstore_options)
   target_compile_definitions(kvstore_unit_tests PRIVATE KVSTORE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   gtest_discover_tests(kvstore_unit_tests)
 

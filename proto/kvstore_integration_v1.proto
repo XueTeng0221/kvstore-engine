@@ -1,0 +1,109 @@
+syntax = "proto3";
+package kvstore.integration.v1;
+
+message TraceContext { string request_id = 1; string model_id = 2; string tenant_id = 3; }
+message Capabilities {
+  uint32 major = 1;
+  uint32 minor = 2;
+  bool pinned_cpu = 3;
+  bool cuda_ipc = 4;
+}
+// Numeric tensor enums are the frozen model.hpp v1 values; unknown values are rejected.
+message TensorManifest {
+  uint32 version = 1;
+  string tenant_id = 2;
+  string model_id = 3;
+  string model_revision = 4;
+  string adapter_id = 5;
+  string adapter_revision = 6;
+  string tokenizer_revision = 7;
+  string cache_format = 8;
+  uint32 cache_format_version = 9;
+  bytes token_digest = 10;
+  uint64 token_count = 11;
+  uint32 layer_begin = 12;
+  uint32 layer_count = 13;
+  uint32 dtype = 14;
+  repeated uint64 shape = 15;
+  repeated uint32 axis_order = 16;
+  repeated uint64 strides_bytes = 17;
+  uint32 layout = 18;
+  uint32 key_value_packing = 19;
+  uint32 block_tokens = 20;
+  uint32 device_kind = 21;
+  uint32 device_index = 22;
+  uint32 tensor_parallel_rank = 23;
+  uint32 tensor_parallel_size = 24;
+  uint32 pipeline_parallel_rank = 25;
+  uint32 pipeline_parallel_size = 26;
+  uint64 payload_bytes = 27;
+  uint32 chunk_bytes = 28;
+  uint32 chunk_alignment_bytes = 29;
+  uint32 chunk_count = 30;
+  uint32 compression = 31;
+  bytes payload_digest = 32;
+  uint64 created_at_ns = 33;
+  uint64 accessed_at_ns = 34;
+}
+enum Operation {
+  UNSPECIFIED = 0;
+  NEGOTIATE = 1;
+  LOOKUP = 2;
+  RESERVE = 3;
+  PUT = 4;
+  GET = 5;
+  RELEASE = 6;
+  ABORT = 7;
+  COMMIT = 8;
+  CANCEL = 9;
+}
+enum StatusCode {
+  OK = 0;
+  INVALID_ARGUMENT = 1;
+  NOT_FOUND = 2;
+  ALREADY_EXISTS = 3;
+  LIMIT_EXCEEDED = 4;
+  CORRUPTION = 5;
+  UNSUPPORTED = 6;
+  CANCELLED = 7;
+  DEADLINE_EXCEEDED = 8;
+  BUSY = 9;
+  INTERNAL = 10;
+  IO_ERROR = 11;
+}
+message TokenRange { uint64 begin = 1; uint64 end = 2; }
+message Request {
+  Operation operation = 1;
+  TraceContext trace = 2;
+  Capabilities capabilities = 3;
+  TensorManifest manifest = 4;
+  uint64 reservation_id = 5;
+  uint64 lease_id = 6;
+  uint32 chunk_index = 7;
+  bytes payload = 8;
+  uint32 payload_checksum = 9;
+  repeated uint32 token_ids = 10;
+  repeated uint64 prefix_lengths = 11;
+  bool exact = 12;
+  uint64 deadline_unix_ms = 13;
+  bool cancelled = 14;
+}
+message Response {
+  Operation operation = 1;
+  TraceContext trace = 2;
+  StatusCode status = 3;
+  string message = 4;
+  Capabilities capabilities = 5;
+  TensorManifest manifest = 6;
+  uint64 reservation_id = 7;
+  uint64 lease_id = 8;
+  uint64 hit_tokens = 9;
+  repeated TokenRange hit_ranges = 10;
+  repeated TokenRange recompute_ranges = 11;
+  repeated uint32 chunk_indices = 12;
+  uint32 layer_begin = 13;
+  uint32 layer_count = 14;
+  bytes payload = 15;
+  uint32 payload_checksum = 16;
+  bool recompute = 17;
+}

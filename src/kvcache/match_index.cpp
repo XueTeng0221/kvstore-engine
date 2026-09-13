@@ -95,9 +95,13 @@ std::vector<std::uint32_t> ChunkIndices(const TensorManifest& manifest) {
 
 MatchResult MakeResult(const TensorManifest& manifest, const CacheKey& key,
                        std::uint64_t query_tokens) {
-  MatchResult result{
-      key, manifest, manifest.token_count, manifest.layer_begin, manifest.layer_count,
-      ChunkIndices(manifest), {}};
+  MatchResult result{key,
+                     manifest,
+                     manifest.token_count,
+                     manifest.layer_begin,
+                     manifest.layer_count,
+                     ChunkIndices(manifest),
+                     {}};
   if (manifest.token_count < query_tokens) {
     result.missing_tokens.push_back({manifest.token_count, query_tokens});
   }
@@ -316,6 +320,22 @@ Result<MatchResult> MatchIndex::LongestPrefix(const TensorManifest& query,
   return Status{StatusCode::kNotFound, "cache prefix does not exist"};
 } catch (const std::bad_alloc&) {
   return Status{StatusCode::kLimitExceeded, "unable to allocate prefix query"};
+}
+
+void MatchIndex::RollbackInsert(const CacheKey& key) noexcept {
+  std::unique_lock lock(mutex_);
+  for (auto partition = partitions_.begin(); partition != partitions_.end(); ++partition) {
+    for (auto length = partition->second.begin(); length != partition->second.end(); ++length) {
+      auto& entries = length->second;
+      auto entry = std::ranges::find_if(entries, [&](const Entry& e) { return e.key == key; });
+      if (entry == entries.end()) continue;
+      entries.erase(entry);
+      --size_;
+      if (entries.empty()) partition->second.erase(length);
+      if (partition->second.empty()) partitions_.erase(partition);
+      return;
+    }
+  }
 }
 
 std::size_t MatchIndex::Size() const {

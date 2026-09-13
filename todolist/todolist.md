@@ -1102,14 +1102,80 @@ Residual risks: runtime policy/scheduler construction is assigned to P7.5；dete
 
 ## P8：vLLM 与 SGLang 集成
 
-### [ ] P8.1 版本化集成协议
+### [x] P8.1 版本化集成协议
 
-- [ ] 选择 adapter/sidecar 边界，定义 capability negotiation 和版本策略
-- [ ] 定义 lookup/reserve/put/get/release/abort 请求及 tensor descriptor
-- [ ] 明确 CPU pinned memory、CUDA IPC 或网络传输的首版路径
-- [ ] 定义超时、取消、部分命中、校验失败和回退重算行为
-- [ ] 支持 request/model/tenant trace context
-- [ ] 提供框架无关 mock client 和 contract tests
+- [x] 选择 adapter/sidecar 边界，定义 capability negotiation 和版本策略
+- [x] 定义 lookup/reserve/put/get/release/abort 请求及 tensor descriptor
+- [x] 明确 CPU pinned memory、CUDA IPC 或网络传输的首版路径
+- [x] 定义超时、取消、部分命中、校验失败和回退重算行为
+- [x] 支持 request/model/tenant trace context
+- [x] 提供框架无关 mock client 和 contract tests
+
+工作记录：
+
+```text
+Task ID: P8.1
+Owner: Agent A
+Dependencies: P0.1, P7.1, P7.2, P7.3, P7.4, P7.5 (completed headings; P7.5 audit round 17 pass-with-risk)
+Scope: Protobuf+UDS versioned integration contract, framework-independent mock client and contract tests; CPU pinned staging ownership and fallback semantics; Docker daemon preparation for P8.2/P8.3.
+Acceptance: six checkboxes above backed by schema/documentation and automated contract tests; independent Agent B audit required. Real framework/GPU integration remains P8.2-P8.4.
+Changed files: CMakeLists.txt, proto/kvstore_integration_v1.proto, include/kvstore/integration/protocol.hpp, src/integration/protocol.cpp, tests/unit/integration_protocol_test.cpp, docs/p8-integration-protocol.md
+Commands: `protoc --version` (unavailable); `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_BUILD_BENCHMARKS=OFF && cmake --build build -j2 && ctest --test-dir build --output-on-failure`; ASAN/UBSAN and TSAN configure/build with focused `Codec|Session` ctest filters
+Test result: Full Debug 162/162 passed; ASAN/UBSAN 3/3 integration tests passed; TSAN 3/3 integration tests passed with setarch.
+Design limitations: protobuf-generated bindings are unavailable because protoc/runtime are not installed; the checked-in schema and dependency-free codec provide the bounded executable contract. P8.1 defines framing and mock semantics, not a production UDS listener. Prefix matching remains implemented by the existing MatchIndex/RequestPath boundary and is not duplicated in Session.
+Residual risks: P7.5 synchronous filesystem shutdown risk remains tracked for future I/O backend work; GPU support not yet verified.
+
+Audit round: 1
+Auditor: Agent B
+Verdict: fail
+Findings: high src/integration/protocol.cpp:84-118 foreign sessions can Put/Commit/Abort reservations and Get foreign tenant manifests; high :101-104 failed Commit loses tracking and leaks; high include/kvstore/integration/protocol.hpp:41 missing destructor cleanup and copy restrictions; high src/integration/protocol.cpp:88-89 tracking allocation lacks rollback; high :46 Feed allocates unbounded input before checking; medium :18 Encode uses 9 instead of 13 header bytes; high :112 Release is a no-op; high proto/kvstore_integration_v1.proto:5-7 lacks full manifest, requests/responses, generated codec/dispatch mock, prefix hit and recompute wire semantics; documentation does not establish precise pinned ownership. Locations refer to the audited first pass.
+Commands: findings reproduced by independent auditor and supplied by parent; exact auditor commands not supplied.
+Residual risks: all listed findings require remediation and a new independent audit; six premature acceptance checkboxes reset.
+
+Remediation owner: fresh Agent A; P8.1 remains [~] pending independent audit. No audit pass is claimed.
+Remediation dependencies: P0.1, P7.1-P7.5; Docker handled by parent, outside this change.
+Remediation scope: real generated Protobuf request/response codec and executable mock dispatcher; session ownership, failure rollback, destructor cleanup, bounded framing, lease unpin, MatchIndex prefix and recompute semantics, regression and sanitizer tests.
+Implementation: Protobuf 3.21.12 fetched and built using pinned archive SHA256; previous protoc-unavailable/dependency-free-codec limitation is superseded. Full 34-field manifest, capabilities, trace, deadline/cancellation, all operations, IDs, explicit statuses and hit/recompute ranges are generated and serialized. Session constructor binds authorized identity; registry IDs are owner-checked, lease IDs are process-unique and session-owned. Failed commit retains reservation and rolls back staged index; commit prepares lease metadata before publication. Preallocated tracking eliminates acquisition-time allocation; failure hook verifies rollback. Destructor/disconnect abort and unpin; Release never deletes cache data. Registry Abort and MatchIndex rollback are allocation-free cleanup paths.
+Changed files: CMakeLists.txt; proto/kvstore_integration_v1.proto; include/kvstore/integration/protocol.hpp; src/integration/protocol.cpp; src/integration/mock_client.cpp; tests/unit/integration_protocol_test.cpp; docs/p8-integration-protocol.md; include/kvstore/kvcache/match_index.hpp; src/kvcache/match_index.cpp; src/kvcache/chunk_registry.cpp; todolist/todolist.md. Existing edits to request_path/tiered_store tests were left unchanged.
+Condition evidence: capability/version tests and protocol doc; generated manifest/all-op request/response schema and dispatch; precise adapter-owned page-locked staging/copy/event ownership docs; exact/prefix/miss/deadline/cancel/checksum tests with wire ranges; authorized trace and cross-session/cross-tenant denial tests; executable kvstore_mock_client serialized publish/lookup/get/release workflow plus 21 unit contract tests. Six acceptance boxes intentionally remain unchecked pending independent review.
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON`; `cmake --build build -j4`; `ctest --test-dir build --output-on-failure`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined`; `cmake --build build-asan -j4`; `ctest --test-dir build-asan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'`; equivalent build-tsan configure/build with `-DKVSTORE_SANITIZERS=thread`; `setarch x86_64 -R ctest --test-dir build-tsan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'`; `setarch x86_64 -R ctest --test-dir build-tsan --output-on-failure --repeat until-fail:5 -R 'IntegrationSession'`; scoped clang-format -i and --dry-run --Werror; `cmake --build build --target format-check`; `git diff --check`.
+Test result: full Debug 181/181 passed (18.75s); ASAN/UBSAN affected 64/64 passed (3.91s), no sanitizer reports; TSAN affected 64/64 passed (3.44s), no race reports; 16 Session tests repeated five times under TSAN, 80/80 executions passed (2.66s). Initial simultaneous build/test commands hit the tool's 120s total limit; completed with longer windows, without removing/skipping tests. All changed C++ files pass scoped clang-format and diff whitespace checks. Whole-repository format-check fails on pre-existing formatting in include/kvstore/kvcache/{request_path,tiered_store}.hpp and src/kvcache/{request_path,tiered_store}.cpp; these unrelated files were not reformatted.
+Residual risks / handoff: independent Agent B round 2 required. P8.2/P8.3 (Owner: Agent A/parent) own real adapters, GPU validation and asynchronous transfer cancellation; this contract uses admission deadlines and between-operation upload cancellation, not preemptive synchronous commit. P9.2 (Owner: Agent A) owns production UDS peer authentication/listener and configurable service-wide quotas; constructor identity is supplied by trusted caller in this mock. P10.1 (Owner: Agent A) owns expanded protobuf fuzzing, upstream dependency sanitizer/upgrade review and pre-existing whole-tree formatting cleanup. Generated message code and project code are sanitizer-instrumented; upstream protobuf runtime/compiler are not, and emit their existing GCC AlignFail noreturn warning. External cache administration must coordinate registry eviction and index erase; no eviction or disk-load API is claimed here. No Docker changes made.
+```
+
+```text
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: high src/integration/protocol.cpp:191-236 and :295 FromProto requires a 32-byte payload digest and full ValidateManifest for LOOKUP as well as RESERVE, preventing real prefill queries whose tensor payload is not yet computed.
+Commands: independent audit finding supplied by parent; exact auditor commands not supplied.
+Residual risks: remediation and independent re-audit required; P8.1 remains [~] with all six acceptance boxes unchecked.
+Round 2 remediation owner: Agent A
+Dependencies: P0.1, P7.1-P7.5; Docker remains parent-owned.
+Scope: separate query/publication manifest decoding, allow absent/zero query payload digest while rejecting malformed supplied lengths, retain full publication validation, verify serialized exact/prefix/miss responses return stored digest, update documentation and run full Debug plus affected ASAN/UBSAN/TSAN.
+Implementation: FromProto takes explicit ManifestUse (publication by default); LOOKUP selects query validation through ValidateManifestIdentity and safely leaves absent payload digest zero-initialized. Nonempty payload digests must be exactly 32 bytes in both modes. RESERVE retains ValidateManifest and rejects absent/all-zero payload digests before acquiring registry state. Hit replies continue to use the resident source manifest and stored digest. Mock client now issues Lookup without a payload digest.
+Changed files: include/kvstore/integration/protocol.hpp; src/integration/protocol.cpp; src/integration/mock_client.cpp; tests/unit/integration_protocol_test.cpp; docs/p8-integration-protocol.md; todolist/todolist.md.
+Regression evidence: four added serialized tests cover absent/32-zero digests for exact and prefix hits and misses, full stored response manifest/digest and hit/recompute ranges, reservation rejection with zero pending/tracked bytes, malformed digest lengths 1/31/33 for both operations, and unchanged token/geometry/tenant query validation. Existing publication/commit checksum tests remain intact.
+Commands: `cmake --build build -j4 && ctest --test-dir build --output-on-failure`; `cmake --build build-asan -j4 && ctest --test-dir build-asan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'`; `cmake --build build-tsan -j4 && setarch x86_64 -R ctest --test-dir build-tsan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'`; `clang-format -i` and `clang-format --dry-run --Werror` on the four changed C++ files; `git diff --check`.
+Test result: full Debug 185/185 passed (17.67s); affected ASAN/UBSAN 68/68 passed (4.14s), no sanitizer reports; affected TSAN 68/68 passed (2.53s), no race reports. Changed-file formatting and diff whitespace checks passed. Whole-tree pre-existing formatting limitation from round 1 is unchanged.
+Handoff: independent Agent B round 3 required; no audit pass claimed. P8.1 remains [~] and all six acceptance boxes remain unchecked. Existing residual risks remain registered above; no Docker or unrelated file changes in this round.
+```
+
+```text
+Audit round: 3
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking; six P8.1 conditions satisfied within documented resident serialized mock scope. Query/publication validation, session ownership, rollback, RAII, bounded framing, generated Protobuf dispatch, prefix/recompute responses and lease release independently verified.
+Commands: cmake --build build -j4; ctest --test-dir build --output-on-failure; cmake --build build-asan -j4; ctest --test-dir build-asan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'; cmake --build build-tsan -j4; setarch x86_64 -R ctest --test-dir build-tsan --output-on-failure -R 'Integration(Codec|Session|Mock)|KvCache(Model|Match|RequestPath)'; clang-format --dry-run --Werror include/kvstore/integration/protocol.hpp src/integration/protocol.cpp src/integration/mock_client.cpp tests/unit/integration_protocol_test.cpp; git diff --check
+Test result: independent full Debug 185/185; ASAN/UBSAN 68/68; TSAN 68/68; no sanitizer reports; changed-file format and whitespace checks passed.
+Residual risks: P8.2/P8.3 Owner Agent A: real adapters, GPU transfers/cancellation and RequestPath integration; P9.2 Owner Agent A: production UDS listener/authentication and configurable quotas; P10.1 Owner Agent A: protobuf fuzzing, upstream runtime/compiler sanitizer and upgrade review, pre-existing formatting cleanup. Accepted scope: external eviction must coordinate registry/index removal; resident mock does not claim disk loading or production transport.
+Completion: P8.1 accepted after independent round 3; historical pending/fail statements above are superseded, not removed.
+
+Docker preparation (Agent A): Windows Docker Desktop started using powershell.exe Start-Process; host Docker CLI verifies Client=29.4.0 Server=29.4.0 OS=linux and registered nvidia runtime. Linux docker info still fails because /var/run/docker.sock is absent; Windows CLI remains usable from WSL at /mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe.
+Commands: docker info; systemctl status docker --no-pager; docker desktop start; powershell.exe -NoProfile -Command 'Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"'; host docker.exe info/version; host docker.exe run --rm --gpus all ubuntu:24.04 nvidia-smi
+Test result: daemon enabled and host API responsive. GPU smoke could not start: Docker Hub manifest request timed out; no local images available. Registered nvidia runtime alone is not proof of GPU execution.
+Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if needed, resolve approved registry/proxy access and rerun GPU container smoke before framework acceptance. Do not claim GPU readiness or M7 completion.
+```
 
 ### [ ] P8.2 vLLM adapter
 
@@ -1235,7 +1301,7 @@ Audit round: <N>
 
 - [x] M0/M1 已依据 P0/P1 最终 `pass` 审计补正里程碑状态
 - [~] 实现并审计 P7.1；通过后按依赖推进 P7.2/P7.3
-- [!] P8.2-P8.4 真实 GPU 验收等待带 NVIDIA 支持的 Docker daemon 可用
+- [!] P8.2-P8.4 真实 GPU 验收：Windows Docker daemon 已启动且注册 NVIDIA runtime；等待镜像仓库连通及 GPU 容器 smoke 通过，WSL 原生 socket 尚不可用（Owner: Agent A）
 
 ## 工作记录模板
 

@@ -382,7 +382,7 @@ TEST(KvCacheRequestPathTest, LastWaiterCancelsAndShutdownIsRepeatable) {
 
 struct SchedulerFailureCase {
   const char* name;
-  bool SchedulerConfig::* flag;
+  bool SchedulerConfig::*flag;
   StatusCode expected;
 };
 
