@@ -81,6 +81,15 @@ add_custom_command(
     ${CMAKE_CURRENT_SOURCE_DIR}/proto/kvstore_integration_v1.proto
   DEPENDS protobuf::protoc proto/kvstore_integration_v1.proto
   VERBATIM)
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/python/kvstore_integration_v1_pb2.py
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/python
+  COMMAND protobuf::protoc --python_out=${CMAKE_CURRENT_BINARY_DIR}/python
+    --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/kvstore_integration_v1.proto
+  DEPENDS protobuf::protoc proto/kvstore_integration_v1.proto
+  VERBATIM)
+add_custom_target(kvstore_python_proto DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/python/kvstore_integration_v1_pb2.py)
 add_library(kvstore_integration_proto ${CMAKE_CURRENT_BINARY_DIR}/kvstore_integration_v1.pb.cc)
 target_include_directories(kvstore_integration_proto SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(kvstore_integration_proto PUBLIC protobuf::libprotobuf)
@@ -121,7 +130,7 @@ target_include_directories(kvstore_kvcache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/in
 target_include_directories(kvstore_kvcache SYSTEM PRIVATE ${picosha2_SOURCE_DIR})
 target_link_libraries(kvstore_kvcache PUBLIC kvstore_common kvstore_options)
 
-add_library(kvstore_integration src/integration/protocol.cpp src/integration/sglang/hicache_storage.cpp)
+add_library(kvstore_integration src/integration/protocol.cpp src/integration/uds_bridge.cpp src/integration/sglang/hicache_storage.cpp)
 target_include_directories(kvstore_integration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(kvstore_integration PUBLIC kvstore_kvcache kvstore_options kvstore_integration_proto)
 add_executable(kvstore_mock_client src/integration/mock_client.cpp)
@@ -158,6 +167,7 @@ add_executable(kvstore_server src/server/main.cpp)
 target_link_libraries(kvstore_server PRIVATE kvstore_common kvstore_engine_lib kvstore_options)
 
 if(KVSTORE_BUILD_TESTS)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   FetchContent_Declare(
     googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
@@ -167,6 +177,16 @@ if(KVSTORE_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
   include(GoogleTest)
   add_subdirectory(tests/integration/vllm)
+  add_executable(kvstore_uds_bridge_fixture tests/integration/uds_bridge_fixture.cpp)
+  target_link_libraries(kvstore_uds_bridge_fixture PRIVATE kvstore_integration kvstore_options)
+  add_dependencies(kvstore_uds_bridge_fixture kvstore_python_proto)
+  add_test(NAME UdsBridgeLive COMMAND ${Python3_EXECUTABLE} -m unittest discover
+    -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/python -p test_uds_bridge_live.py -v)
+  set_tests_properties(UdsBridgeLive PROPERTIES TIMEOUT 45 ENVIRONMENT
+    "KVSTORE_UDS_FIXTURE=$<TARGET_FILE:kvstore_uds_bridge_fixture>;KVSTORE_PYTHON_PROTO_DIR=${CMAKE_CURRENT_BINARY_DIR}/python")
+  add_test(NAME UdsTransport COMMAND ${Python3_EXECUTABLE} -m unittest discover
+    -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/python -p test_uds_transport.py -v)
+  set_tests_properties(UdsTransport PROPERTIES TIMEOUT 20)
   add_test(NAME IntegrationMockClient COMMAND kvstore_mock_client)
 
   add_executable(kvstore_unit_tests

@@ -1179,6 +1179,9 @@ Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if need
 
 ### [~] P8.2 vLLM adapter
 
+Round 17 fail remediation / audit18 preparation (2026-09-14): Owner Agent A; dependencies P8.1 and existing UDS bridge. Scope: NUL validation before socket allocation, CTest missing-protobuf hard failure, bounded deterministic concurrent C++ Start/Stop fixture, socket cleanup, and actual Debug/ASAN/TSAN verification using .venv-vllm Python. No framework changes or audit verdict. Acceptance: full Debug and verbose live sanitizer runs with zero skips; dependency-negative and lifecycle regressions pass. Status remains [~], pending independent Agent B audit18.
+Evidence correction: round 16's ASAN 0.07s and TSAN 0.06s CTest successes did not establish live execution: the loader could skip all tests when protobuf was absent. Those sanitizer coverage/no-report claims are withdrawn; replacement results will be recorded after actual execution.
+
 Runtime implementation work record (2026-09-13):
 Owner: Agent A (current implementation context); independent audit: parent, not this agent.
 Dependencies: P8.1 accepted round 3; local Qwen2.5-0.5B revision 060db6499f32faf8b98477b0a26969ef7d8b9987; RTX 4060 CUDA.
@@ -1288,6 +1291,256 @@ Acceptance: automated miss/partial/full hit, metadata isolation, upload cleanup,
 Changed files: CMakeLists.txt; include/kvstore/integration/sglang/hicache_storage.hpp; src/integration/sglang/hicache_storage.cpp; tests/unit/sglang_hicache_storage_test.cpp; docs/p8-sglang-adapter.md; todolist/todolist.md
 Commands: `cmake --build build -j2` (pass); `ctest --test-dir build --output-on-failure -R 'SglangHiCache|IntegrationMockClient'` (existing build: IntegrationMockClient pass); fresh configure/build blocked by pre-existing/unowned `src/integration/vllm/CMakeLists.txt:6` deferred `add_subdirectory` error. No real SGLang/GPU E2E claimed.
 Test result: adapter library compiles in existing build; focused new test could not be registered because fresh configure is blocked by the unrelated vLLM CMake change. Agent B audit required; P8.3 remains [~].
+
+Acceptance continuation (2026-09-13, Qwen2.5-0.5B): `.venv-vllm` reports vLLM 0.29.0 and torch 2.13.0+cu130 with CUDA available. The installed `KVConnectorBase_V1` is importable from `vllm.distributed.kv_transfer.kv_connector.v1.base`; no project Python plugin implementing that interface exists, so actual framework callback/E2E acceptance is blocked. Existing C++ SGLang HiCache tests passed 2/2 (`./build/kvstore_unit_tests --gtest_filter='*Sglang*:*HiCache*'`). Real SGLang package is absent from `.venv-vllm`; no Python plugin loading or GPU radix insertion was claimed.
+Commands: `.venv-vllm/bin/python` runtime/API probes; `cmake --build build --target kvstore_vllm_tests -j2 && ./build/tests/integration/vllm/kvstore_vllm_tests --gtest_color=no`; `cmake --build build --target kvstore_unit_tests -j2 && ./build/kvstore_unit_tests --gtest_color=no --gtest_filter='*Sglang*:*HiCache*'`; `git diff --check`.
+Test result: vLLM adapter contract 16/16 passed; SGLang HiCache focused tests 2/2 passed. Framework-level vLLM callback, SGLang runtime, and Qwen2.5-0.5B model E2E remain unverified. P8.3 remains [~].
+
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: critical [todolist/todolist.md:1185-1194,1224,1229,1232] no project Python implementation of vLLM 0.29.0 `KVConnectorBase_V1`, callback path, or block-manager injection; the C++ adapter is only a sidecar/contract adapter. critical [todolist/todolist.md:1196-1201,1281-1294] SGLang has no verified project Python plugin, runtime callback, radix insertion, or GPU transfer path. high [todolist/todolist.md:1226,1230-1231] Qwen2.5-0.5B evidence covers model metadata, forward, and CUDA smoke only, not service-level cache hit/publication E2E. high [todolist/todolist.md:1215,1229,1294] P8.2/P8.3 hard acceptance requires one real vLLM and one real SGLang E2E path, so neither task may be checked.
+Commands: independent source/diff search; `.venv-vllm/bin/python` vLLM 0.29.0 and `KVConnectorBase_V1` import; `.venv-sglang/bin/python` SGLang 0.5.19 import; `cmake --build build --target kvstore_unit_tests kvstore_vllm_tests -j2`; vLLM tests 16/16; SGLang HiCache tests 2/2.
+Residual risks: Agent A owns real vLLM plugin/callback/block-manager validation under P8.2 and real SGLang plugin/radix/GPU/Qwen2.5-0.5B miss/partial/full-hit timeout/cancellation/restart E2E under P8.3. Keep both tasks [~] until hard acceptance evidence exists.
+
+Remediation round (2026-09-13): added `python/kvstore_vllm/connector.py`, a loadable vLLM 0.29.0 `KVConnectorBase_V1` subclass with prefix lookup, load/save callback boundaries, publication binding, and request cleanup; added `python/kvstore_sglang/hicache.py` implementing lookup/publish/release/abort and cancellation cleanup; added `tests/python/test_runtime_adapters.py`. `.venv-vllm` confirms the vLLM connector subclass loads and SGLang adapter smoke passes. The available runtime has no pytest executable, so the Python smoke was run directly with the interpreter. These adapters still require deployment transport wiring and Qwen2.5-0.5B service-level E2E; P8.2/P8.3 remain [~] pending independent re-audit.
+Changed files: python/kvstore_vllm/{__init__.py,connector.py}; python/kvstore_sglang/{__init__.py,hicache.py}; tests/python/test_runtime_adapters.py; todolist/todolist.md
+Commands: `.venv-vllm/bin/python -c '...issubclass(KVStoreConnector, KVConnectorBase_V1)...'`; `.venv-vllm/bin/python -c '...KVStoreHiCacheStorage...cancelled/publish...'`; `git diff --check`. `.venv-vllm/bin/python -m pytest` was attempted and is unavailable because pytest is not installed.
+Test result: vLLM subclass import 1/1 passed; SGLang adapter smoke passed; no real vLLM server or SGLang Qwen2.5-0.5B E2E was claimed.
+
+Audit round: 3
+Auditor: Agent B
+Verdict: fail
+Findings: critical `python/kvstore_vllm/connector.py` omitted abstract vLLM methods and used incorrect callback signatures; high load/save paths did not inject paged GPU KV, synchronize state, or preserve all layers; high `python/kvstore_sglang/hicache.py` was only a callable wrapper without SGLang registration or runtime contract validation; high real Qwen2.5-0.5B framework E2E was absent.
+Commands: independent source audit; vLLM base signature inspection; C++ vLLM 16/16; SGLang 2/2; Python unittest 1/1.
+Residual risks: remediation required before another audit; P8.2/P8.3 remain [~].
+
+Remediation round after audit 3 (2026-09-13): vLLM connector now has no remaining abstract methods, uses `(request, num_computed_tokens) -> (tokens, async)` matching 0.29.0, implements allocation/meta callbacks, protects shared state with `RLock`, and retains per-layer save payloads. Python unittest and connector abstract-method inspection pass. C++ vLLM 16/16 and SGLang 2/2 pass again. Real paged GPU block injection, SGLang runtime registration, transport wiring, and Qwen2.5-0.5B framework E2E remain open hard acceptance conditions.
+Changed files: python/kvstore_vllm/connector.py; tests/python/test_runtime_adapters.py; todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -c 'from kvstore_vllm import KVStoreConnector; print(sorted(KVStoreConnector.__abstractmethods__))'`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests/python/test_runtime_adapters.py`; `cmake --build build --target kvstore_vllm_tests kvstore_unit_tests -j2`; vLLM 16/16 and SGLang 2/2.
+Test result: abstract-method set empty; Python unittest 1/1; C++ focused suites pass. No completion claim.
+
+Audit round: 4
+Auditor: Agent B
+Verdict: fail
+Findings: critical `python/kvstore_vllm/connector.py:54-59` deleted `layer_name` before using it, so every active vLLM save callback raised `UnboundLocalError`; high save/finish atomicity and failure semantics were not established; high vLLM GPU block injection, SGLang runtime registration, and Qwen2.5-0.5B framework E2E remained absent.
+Commands: vLLM abstract/signature inspection; Python unittest 1/1; C++ adapter ctest 18/18; `git diff --check`; independent static review.
+Residual risks: Agent A fixed the `layer_name` defect; atomic save/finish semantics, real GPU block injection, SGLang registration, and Qwen2.5-0.5B framework E2E remain open under P8.2/P8.3.
+
+Round 4 remediation: removed the erroneous `del layer_name` from `save_kv_layer`. This is a minimal correctness fix; no completion or E2E claim is made.
+Changed files: python/kvstore_vllm/connector.py; todolist/todolist.md
+Commands: `git diff --check`; pending rerun of Python callback smoke and independent Agent B audit.
+
+Audit round: 5
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM `KVConnectorBase_V1` callback/GPU block injection remains unverified; critical SGLang runtime registration/radix/GPU path remains absent; high Qwen2.5-0.5B framework E2E remains absent; high active `save_kv_layer` callback smoke could not instantiate the connector without a valid upstream `kv_transfer_config`; medium unittest discovery ran 0 tests because the Python test directory is not packaged for discovery. The round-4 source typo was removed, but no executable callback evidence proves the fix.
+Commands: independent source review; unittest discovery (0 tests); attempted active callback construction (blocked by upstream config requirement); C++ vLLM 16/16; SGLang 2/2; `git diff --check`.
+Residual risks: Agent A must provide a valid vLLM config fixture and execute callback tests, implement real GPU block injection and SGLang registration, and run Qwen2.5-0.5B framework E2E covering miss/partial/full hit, publication, cancellation, timeout, and restart. P8.2/P8.3 remain [~].
+
+Round 5 remediation (2026-09-14): added `tests/python/__init__.py`, a valid minimal `kv_transfer_config` fixture, vLLM connector construction, and a two-layer `save_kv_layer` callback test. Python unittest discovery now runs 2/2; C++ vLLM tests 16/16 and SGLang tests 2/2 pass. This proves connector construction and layer-name handling only; real GPU block injection, SGLang runtime registration, transport wiring, and Qwen2.5-0.5B framework E2E remain open.
+Changed files: tests/python/__init__.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `cmake --build build --target kvstore_vllm_tests kvstore_unit_tests -j2`; vLLM 16/16; SGLang 2/2; `git diff --check`.
+Test result: Python 2/2, vLLM 16/16, SGLang 2/2 passed. No real framework E2E claim.
+
+Audit round: 6
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM paged GPU block injection, CUDA event synchronization, and active DMA cancellation remain unverified; critical real SGLang 0.5.19 registration, radix insertion, and GPU transfer remain unverified; high Qwen2.5-0.5B framework E2E remains unmet; high Python callback test mutates private connector state without documenting the test-only setup; medium save completion/failure atomicity is not defined when the store callback raises.
+Commands: `.venv-vllm/bin/python -m unittest discover -s tests/python -v` (2/2); C++ vLLM target build and previously recorded 16/16; SGLang focused previously recorded 2/2; `git diff --check`.
+Residual risks: Agent A owns real vLLM GPU integration under P8.2, real SGLang runtime registration under P8.3, and Qwen2.5-0.5B framework E2E under P8.4. P8.2/P8.3 remain [~].
+
+Round 6 remediation (2026-09-14): added public `begin_save(request_id, token_ids)` lifecycle setup, changed `request_finished` to the vLLM 0.29.0 return contract, retained pending payloads when the store callback raises so the operation is retryable, and added a failure/retry unittest. Tests no longer mutate connector private state. Python unittest discovery passes 3/3; vLLM C++ passes 16/16; SGLang C++ passes 2/2; diff check passes. Real GPU block injection, SGLang registration, and Qwen2.5-0.5B framework E2E remain hard acceptance blockers.
+Changed files: python/kvstore_vllm/connector.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `cmake --build build --target kvstore_vllm_tests kvstore_unit_tests -j2`; vLLM 16/16; SGLang 2/2; `git diff --check`.
+Test result: Python 3/3, vLLM 16/16, SGLang 2/2 passed. No framework E2E completion claim.
+
+Round 7 remediation (2026-09-14): replaced the process-wide active request field with a `ContextVar`, made save callback failures isolated per pending transaction while retaining retryable state, added pre/post deadline checks to the SGLang lookup boundary, and added a deadline regression test. Python unittest discovery now passes 4/4; C++ vLLM 16/16 and SGLang 2/2 pass; diff check passes. These changes improve callback bookkeeping but do not provide real GPU injection, runtime registration, or framework E2E.
+Changed files: python/kvstore_vllm/connector.py, python/kvstore_sglang/hicache.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; C++ vLLM/SGLang focused tests; `git diff --check`.
+Test result: Python 4/4, vLLM 16/16, SGLang 2/2 passed. No completion claim.
+
+Round 9 remediation (2026-09-14): introduced `_Save` records carrying immutable key and generation, routed explicit layer callbacks through `save_kv_layer_for_request`, guarded duplicate completion with `_saving`, preserved replacement transactions through identity/generation checks, retained callback failures as returned errors, and kept unfinished transactions during `request_finished`. Python discovery passes 4/4. Real GPU/framework integration and bounded SGLang transport cancellation remain unimplemented and are not claimed.
+Changed files: python/kvstore_vllm/connector.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `git diff --check`.
+Test result: Python 4/4 passed. C++ focused baselines remain vLLM 16/16 and SGLang 2/2; no E2E completion claim.
+
+Round 10 remediation (2026-09-14): `request_finished` now marks unfinished transactions without deleting pending state; `wait_for_save` repeatedly drains newly visible replacement transactions in the same call; added explicit `request_scope` routing and deterministic tests for finish-before-save and interleaved request layers. Python discovery passes 6/6. Real GPU/framework E2E remains unverified.
+Changed files: python/kvstore_vllm/connector.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `git diff --check`.
+Test result: Python 6/6 passed. No completion claim.
+
+Round 11 remediation validation (2026-09-14): bounded `wait_for_save` retries each transaction at most once per invocation via a local attempted set. Added deterministic regressions for replacement draining in one wait, concurrent wait deduplication, and callback failure followed by `request_finished` and retry. Python discovery passes 9/9; vLLM and SGLang C++ focused binaries pass; diff check passes.
+Changed files: python/kvstore_vllm/connector.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `cmake --build build --target kvstore_vllm_tests kvstore_unit_tests -j2`; focused vLLM/SGLang binaries; `git diff --check`.
+Test result: Python 9/9, vLLM 16/16, SGLang 2/2 passed. Pending independent round 12 audit; no framework E2E completion claim.
+
+P8.2/P8.3 runtime integration investigation (2026-09-14): vLLM 0.29.0 exposes `bind_gpu_block_pool`, `start_load_kv(ForwardContext)`, `save_kv_layer(layer_name, kv_layer, AttentionMetadata)`, and `build_connector_meta`; actual injection requires the worker's registered layer tensors and allocated block IDs. The current P8.1 C++ Session has no Python binding or transport endpoint, so the existing callable wrapper cannot perform a real paged GPU transfer. SGLang 0.5.19 exposes the abstract `HiCacheStorage` batch interface (`batch_exists_v2`, `batch_get_v2`, `batch_set_v2`) and host-pool registration; the current wrapper does not subclass or register this interface. No Qwen2.5-0.5B framework service E2E was run.
+Evidence commands: inspect `.venv-vllm/vllm/v1/core/block_pool.py`, `vllm/v1/simple_kv_offload/cuda_mem_ops.py`, `vllm/distributed/kv_transfer/kv_connector/v1/base.py`; inspect `.venv-sglang/sglang/srt/mem_cache/hicache_storage.py`; local CUDA/model smoke and existing contract tests remain as previously recorded. This is an interface-boundary finding, not an acceptance claim.
+
+Audit round: 17 remediation / round 18 handoff (2026-09-14)
+Auditor: pending independent Agent B
+Verdict: pending
+Findings: round 17 findings addressed in UDS bridge scope: Python rejects NUL before socket creation; CTest live loader raises on missing protobuf rather than skipping; C++ fixture has deterministic 32-round concurrent Start/Stop mode with bounded condition-variable waits; transport listener/client sockets use cleanup guards and exact reads.
+Changed files: include/kvstore/integration/uds_bridge.hpp; src/integration/uds_bridge.cpp; tests/integration/uds_bridge_fixture.cpp; python/kvstore_vllm/uds.py; tests/python/test_uds_bridge_live.py; tests/python/test_uds_transport.py; CMakeLists.txt; todolist/todolist.md
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DPython3_EXECUTABLE=/home/t0n1kr8s/kvstore-engine/.venv-vllm/bin/python`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined -DPython3_EXECUTABLE=/home/t0n1kr8s/kvstore-engine/.venv-vllm/bin/python`; `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread -DPython3_EXECUTABLE=/home/t0n1kr8s/kvstore-engine/.venv-vllm/bin/python`; `cmake --build build -j2`; `ctest --test-dir build --output-on-failure`; `cmake --build build-asan -j2`; `ctest --test-dir build-asan --output-on-failure -V`; `cmake --build build-tsan -j2`; `setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -V`; `PYTHONPATH=python /home/t0n1kr8s/kvstore-engine/.venv-vllm/bin/python -m unittest discover -s tests/python -v`
+Test result: Debug 205/205 passed, 0 skipped, 19.43s. ASAN/UBSAN verbose live 205/205 passed, 0 skipped, 59.97s, no sanitizer reports. TSAN verbose live under setarch 205/205 passed, 0 skipped, 105.42s, no race reports. CTest UdsBridgeLive executed 8/8 tests in each sanitizer build, including 32-round concurrent fixture lifecycle and NUL pre-socket rejection. Standalone Python discovery 20 tests passed with 8 expected fixture-dependent skips; its negative test verifies CTest-style missing protobuf exits nonzero and does not report skip. Previous round 16 sanitizer claims are superseded because they did not prove live execution.
+Residual risks: real vLLM/SGLang framework and GPU acceptance remain P8.2-P8.4; same-UID SO_PEERCRED is the documented trust boundary. UDS bridge audit round 18 required.
+
+Audit round: 18
+Auditor: Agent B
+Scope: Independent UDS bridge subset audit; no framework/GPU acceptance claim. P8.2/P8.3 remain [~].
+Verdict: fail
+Findings: high `src/integration/uds_bridge.cpp:66-68` releases listener rollback ownership before accept-thread construction; injected `pthread_create -> EAGAIN` caused uncaught `std::system_error`, SIGABRT, and a stale socket pathname. High `src/integration/uds_bridge.cpp:101` performs allocation and worker-thread construction inside `Run() noexcept`; resource exhaustion can terminate the process, including vector allocation failure after a joinable temporary worker is created. High `src/integration/uds_bridge.cpp:48,61-65` checks parent spelling but not safe parent ownership/permissions or symlink traversal, and records whichever inode is present after bind; replacing the pathname at the post-bind breakpoint made startup report READY and Stop delete the replacement socket. A mode-0777 non-sticky parent was also accepted. Medium `tests/python/test_uds_bridge_live.py:183-213` and `tests/integration/uds_bridge_fixture.cpp:26` lack deterministic replacement-during-startup, post-bind rollback, simultaneous 32-client exhaustion/recovery, and startup fault-injection coverage.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture kvstore_unit_tests kvstore_mock_client -j2`; `ctest --test-dir build --output-on-failure -R '^(UdsBridgeLive|UdsTransport|IntegrationMockClient|IntegrationSession\..*)$'`; `ctest --test-dir build-asan --output-on-failure -V -R '^(UdsBridgeLive|UdsTransport|IntegrationMockClient)$'`; `setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -V -R '^(UdsBridgeLive|UdsTransport|IntegrationMockClient)$'`; `git diff --check`; bounded Python/GDB probes forcing pthread_create EAGAIN, replacing the pathname at the post-bind breakpoint, and testing a mode-0777 parent.
+Test result: Debug focused 23/23 passed, including 20 Session tests. ASAN/UBSAN and TSAN focused 3/3 CTest entries passed each with no reports; each configuration actually executed live 8/8 and transport 3/3 tests without skips. Sanitizer tests used existing build artifacts; only Debug targets were rebuilt in this audit. Round 17 NUL-before-socket, missing-protobuf hard failure, bounded 32-round concurrent Start/Stop, and Python socket cleanup remediation verified. Both fault-injection defect reproductions succeeded; an initial unresolved GDB breakpoint attempt did not inject and was rerun successfully with pending breakpoints.
+Residual risks: Agent A owns exception-safe startup/worker admission, robust pathname ownership/rollback, and deterministic regression coverage in the P8 UDS bridge work before independent re-audit. Same-UID peer trust remains the accepted boundary; production timeout/quota work remains P9.2. Real vLLM/SGLang framework and GPU acceptance remains outstanding under P8.2-P8.4 and is outside this subset verdict.
+
+Round 18 remediation start (2026-09-14): Agent A. Scope: UDS bridge only. Use the listener fd inode as the ownership credential, perform chmod through the fd, conditionally unlink only the owned inode on every post-bind failure/Stop path, reject symlinked or non-sticky group/world-writable parent directories, and catch worker allocation/thread-construction failures inside the noexcept accept loop. Add unsafe-parent and startup rollback regression coverage. P8.2/P8.3/P8.4 remain [~] and are explicitly out of scope.
+
+Round 18 remediation update: corrected the ownership implementation for Linux AF_UNIX pathname sockets: the pathname inode is recorded only after successful post-bind observation, while chmod uses the listener fd; all cleanup paths compare the recorded inode and never unlink an unobserved replacement. Worker records are reserved and accepted fds are registered before worker startup, with allocation/thread failures contained in Run(). Added live non-sticky world-writable-parent rejection. A same-owner replacement between validated path operations remains a documented platform-level TOCTOU risk; no stronger atomic bindat/unlink-if-inode primitive is available for pathname AF_UNIX sockets in this target API.
+
+Round 20 remediation update: parent traversal and cleanup now remain anchored to an `openat(O_NOFOLLOW)` directory fd; bind uses `/proc/self/fd/<dirfd>/<name>` when it fits and cleanup uses inode-checked `unlinkat`. Path mode is applied with `fchmodat` to the pathname inode and revalidated as 0600 before listen. All listener-thread construction exceptions are converted to Status after fd/path rollback. A direct absolute-path bind fallback is retained only when procfs proxy expansion would reject an otherwise legal sun_path; this fallback remains under the documented same-UID parent trust boundary. Added live mode-0600 and replacement-preservation regressions. P8.2/P8.3/P8.4 remain pending.
+
+Audit round: 21
+Auditor: Agent B
+Verdict: fail
+Findings: high `src/integration/uds_bridge.cpp` could allocate `owned_name_` after bind and leak pathname/object ownership state on bad_alloc; medium `fchmodat(flags=0)` can follow a same-UID replacement before the post-check; medium long-path direct bind fallback cannot retain parent-fd anchoring; medium deterministic startup allocation/thread failure injection is absent.
+Commands: Debug/ASAN+UBSAN/TSAN UdsBridgeLive 10/10 each; 107-byte pathname fallback probe; git diff --check.
+Residual risks: high allocation window enters remediation; same-UID replacement and direct long-path fallback stay within documented trust boundary; framework/GPU/Qwen work remains pending.
+
+Round 21 remediation update: all pathname/name allocations now complete before socket creation or bind; post-bind ownership transfer uses a non-allocating string move, and Start converts preparation exceptions into `kInternal`. No framework integration or Qwen E2E status changed.
+
+Audit round: 22
+Auditor: Agent B
+Verdict: fail
+Findings: high worker allocation/thread admission failure stopped Run without closing listener, leaving an unattended backlog after Start success; medium first post-bind fstatat failure cannot safely distinguish and remove the bridge inode; medium deterministic worker failure injection remains absent.
+Commands: Debug/ASAN+UBSAN/TSAN UdsBridgeLive 10/10 each; 107-byte pathname fallback and mode/cleanup verification; git diff --check.
+Residual risks: worker failure listener lifecycle requires remediation; post-bind observation failure and same-UID replacement remain explicit platform risks; framework/GPU/Qwen pending.
+
+Round 22 remediation update: every Run exit now atomically withdraws and closes the listener and shuts down all registered clients. Path ownership remains exclusively cleaned by Stop using anchored inode-checked unlinkat, avoiding a Run/Stop ownership race. P8.2/P8.3/P8.4 remain pending.
+
+Audit round: 23
+Auditor: Agent B
+Verdict: fail
+Findings: high Stop could close a listener fd while Run retained its numeric value before accept4, allowing unrelated fd reuse; medium first post-bind fstatat failure may retain a stale pathname; low deterministic allocation and fd-reuse fault injection absent.
+Commands: Debug/ASAN+UBSAN/TSAN UdsBridgeLive 10/10 each; long-path fallback; git diff --check.
+Residual risks: listener close ownership requires remediation; same-UID pathname risks and post-bind observation failure remain registered; framework/GPU/Qwen pending.
+
+Round 23 remediation update: listener close ownership is now single-threaded while Run exists. Stop only shutdowns the still-owned listener to wake accept, joins Run, then performs a fallback close only if Run did not withdraw it. This prevents numeric fd reuse before Run exits. Framework and Qwen tasks remain pending.
+
+Audit round: 24
+Auditor: Agent B
+Verdict: fail
+Findings: high Stop load/shutdown could race with Run exchange/close and act on a reused unrelated fd; low no deterministic synchronization/fd-reuse regression.
+Commands: Debug/ASAN+UBSAN/TSAN UdsBridgeLive 10/10 each; long-path fallback; git diff --check.
+Residual risks: listener fd lifetime synchronization requires remediation; previously registered same-UID/path/fault-injection risks remain; framework/GPU/Qwen pending.
+
+Round 24 remediation update: added a dedicated listener lifetime mutex. Stop's load/shutdown and Run's exchange/close are mutually exclusive, and Stop's post-join fallback close uses the same lock, eliminating numeric fd reuse between observation and syscall. P8.2/P8.3/P8.4 remain pending.
+
+Audit round: 25
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: low same-UID pathname replacement can race non-conditional fchmodat before inode revalidation; low maximum-length direct bind fallback cannot use parent-fd anchored bind; low first post-bind fstatat failure preserves a potentially stale pathname to avoid deleting a replacement; low deterministic allocation/thread/fd-reuse fault injection remains absent. No blocking listener/client fd lifetime, rollback, lock-order, shutdown, or restart issue found.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture -j2 && ctest --test-dir build --output-on-failure -R '^UdsBridgeLive$'`; equivalent build-asan ASAN/UBSAN command; equivalent build-tsan command with `setarch "$(uname -m)" -R`; 107-byte pathname fallback probe; `git diff --check`.
+Test result: Debug UdsBridgeLive 10/10 passed; ASAN/UBSAN 10/10 passed with no reports; TSAN 10/10 passed with no race reports; long-path fallback started with mode 0600 and Stop removed its pathname; diff whitespace check passed.
+Residual risks: same-UID SO_PEERCRED is the accepted local trust boundary. The four low findings above are accepted for this UDS subset and remain owned by Agent A under future P9.2/P10.1 transport hardening/fault-injection work. P8.2 vLLM, P8.3 SGLang, and P8.4 Qwen/framework GPU E2E remain pending and were not accepted by this audit.
+
+P8.1 UDS bridge implementation (2026-09-14): added `UdsBridge` with versioned Session-owned tenant/model binding, bounded uint32 length framing around existing protobuf request/response bytes, exact read/write handling, per-connection Session lifecycle, disconnect cleanup, path validation, and stop/unlink behavior. Added Python `SessionTransport` with bounded framing, partial read handling, timeout/reconnect cleanup, and fragmented-response tests. `kvstore_integration` builds and Python UDS transport tests pass. This bridge is transport plumbing only; vLLM paged GPU ownership and SGLang runtime registration remain separate tasks.
+Remediation: Python transport now wraps requests and unwraps responses using the `KVP` v1 envelope with explicit big-endian inner payload size and little-endian UDS outer length. C++ bridge handles EINTR, uses `MSG_NOSIGNAL`, and encodes the outer length explicitly little-endian. Python envelope transport test passes; C++ bridge rebuild passes.
+Commands: `cmake --build build --target kvstore_integration -j2`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v` (10/10); `git diff --check`.
+
+Audit round: 15
+Auditor: Agent B
+Verdict: fail
+Findings: high accepted-client shutdown can block forever because descriptors are not tracked or closed; high unconditional unlink can delete unrelated/replaced socket paths; high one stalled client blocks all other clients; medium Python response validation omits operation/version/reserved fields; medium protocol errors do not close/reset the Python socket and request envelope expansion is not included in max-frame validation; low transport test leaks its listener and uses a fake server rather than the C++ bridge; low peer authentication is absent.
+Commands: bridge build passed; Python 10/10 with ResourceWarning; `git diff --check`; independent envelope/source review.
+Residual risks: fix bridge shutdown/client ownership/path ownership/authentication, complete envelope validation and frame limits, and add real C++/Python interoperability tests. vLLM/SGLang framework acceptance remains unverified.
+
+Round 15 remediation (2026-09-14): accepted clients are now tracked and shutdown before joining; client handling uses owned joinable threads; socket path conflicts are rejected, socket mode is 0600, and Python validates response operation/version plus frame-size expansion and closes on protocol errors. Added real C++ UdsBridge fixture, generated Python protobuf bindings, live cross-language tests and CTest registration. Live tests cover two clients, fragmented/coalesced/malformed frames, invalid requests, reconnect, idle/partial-client stop, and regular-file/socket path conflict preservation. Framework/GPU/Qwen integration remains pending.
+Changed files: include/kvstore/integration/uds_bridge.hpp, src/integration/uds_bridge.cpp, python/kvstore_vllm/{__init__.py,uds.py}, tests/python/test_uds_transport.py, tests/python/test_uds_bridge_live.py, tests/integration/uds_bridge_fixture.cpp, CMakeLists.txt, todolist/todolist.md
+Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DPython3_EXECUTABLE=$PWD/.venv-vllm/bin/python`; `cmake --build build -j2 --target kvstore_uds_bridge_fixture`; `ctest --test-dir build --output-on-failure -R UdsBridgeLive`; `git diff --check`.
+Test result: UdsBridgeLive 1/1 CTest passed; Python discovery's live test requires its CTest fixture environment and is explicitly skipped outside it. Pending independent round 16 audit.
+
+Audit round: 16
+Auditor: Agent B
+Verdict: fail
+Findings: high src/integration/uds_bridge.cpp startup failure after bind can leave a stale socket because ownership is recorded after chmod; high per-client threads and retained thread records are unbounded; medium worker closes fd before removing it from clients_, allowing Stop to act on a reused descriptor; medium concurrent Start/Stop is not synchronized; medium 0600 permits all same-UID processes and the authentication boundary is not explicit; low standalone test discovery imports protobuf before its skip/dependency handling.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture -j2`; `ctest --test-dir build --output-on-failure -R '^UdsBridgeLive$'` (1/1 passed); system Python transport test (1/1 passed); system Python UDS discovery failed with missing google.protobuf; `git diff --check` passed.
+Residual risks: Agent A owns startup pathname cleanup and inode ownership, bounded clients/workers, fd removal-before-close, lifecycle synchronization, explicit same-UID authentication scope, dependency diagnostics and sanitizer validation. Bridge remains unaccepted; vLLM/SGLang framework integration and Qwen E2E remain pending and outside this audit.
+Changed files: include/kvstore/integration/uds_bridge.hpp, src/integration/uds_bridge.cpp, CMakeLists.txt, python/kvstore_vllm/uds.py, python/kvstore_vllm/__init__.py, tests/python/test_uds_transport.py
+Commands: `cmake --build build --target kvstore_integration -j2`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; `git diff --check`.
+Test result: bridge library build passed; Python 10/10 passed. No real vLLM/SGLang framework E2E claim.
+
+Round 16 UDS bridge remediation start (2026-09-14): Agent A. Scope is limited to the UDS bridge, Python transport diagnostics, CMake/test registration, and deterministic bridge regressions. vLLM/SGLang/Qwen framework integration remains pending and out of scope. Dependencies: P8.1 protocol contract. Acceptance: inode-owned pathname cleanup after every bind failure and stop; reject NUL and unsafe parent paths; RAII startup rollback; bounded client slots with worker recycling; remove tracked fd under mutex before close; lifecycle mutex serializes Start/Stop without join deadlock; explicit same-UID trust and SO_PEERCRED check; controlled missing-protobuf diagnostic; lifecycle/exhaustion/recycling/replacement/rollback tests.
+Implementation update: Agent A bounded worker records to kMaxClients and recycles completed records in the accept loop; added live sequential recycling, concurrent-stop/path cleanup, and NUL/conflict preservation regressions. Added explicit same-UID SO_PEERCRED enforcement and retained inode-safe path ownership.
+Changed files: include/kvstore/integration/uds_bridge.hpp, src/integration/uds_bridge.cpp, tests/python/test_uds_bridge_live.py, todolist/todolist.md
+Commands: `timeout 600 ctest --test-dir build --output-on-failure`; `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=address,undefined && cmake --build build-asan --target kvstore_uds_bridge_fixture -j2 && timeout 300 ctest --test-dir build-asan --output-on-failure -R '^UdsBridgeLive$'`; `cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON -DKVSTORE_SANITIZERS=thread && cmake --build build-tsan --target kvstore_uds_bridge_fixture -j2 && timeout 300 setarch "$(uname -m)" -R ctest --test-dir build-tsan --output-on-failure -R '^UdsBridgeLive$'`
+Test result: full Debug 204/204 passed in 19.58s. ASAN/UBSAN UdsBridgeLive 1/1 passed in 0.07s after fixing the standalone missing-protobuf test-loader default. TSAN UdsBridgeLive 1/1 passed in 0.06s. No sanitizer reports or timeouts. Independent Agent B audit remains required; no audit pass is claimed.
+Changed files: include/kvstore/integration/uds_bridge.hpp, src/integration/uds_bridge.cpp, tests/python/test_uds_bridge_live.py, todolist/todolist.md
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture -j2 && ctest --test-dir build --output-on-failure -R '^UdsBridgeLive$'`
+Test result: bridge fixture build passed; UdsBridgeLive 1/1 passed in 0.11s. Full Debug, ASAN/UBSAN, TSAN, and new deterministic exhaustion/lifecycle regressions remain pending. No audit pass is claimed.
+
+Audit round: 14
+Auditor: Agent B
+Verdict: fail
+Findings: high Python transport sends raw length-prefixed protobuf bytes while `Session::Exchange` requires the 13-byte KVP envelope and returns an enveloped response; high bridge shutdown can block on accepted clients and processes only one client at a time; high socket path ownership/unlink and peer authentication are not enforced; high SIGPIPE and exception boundaries are missing; medium native-endian C++ versus explicit little-endian Python mismatch; medium transport test uses a fake byte-reversing server rather than `UdsBridge`, is not registered with CTest, and leaves a socket open.
+Commands: `cmake --build build --target kvstore_integration -j2`; Python discovery 10/10 with ResourceWarning; `git diff --check`; independent source/protocol/lifecycle review.
+Residual risks: bridge remediation required for envelope interoperability, bounded shutdown, path ownership, authentication policy, signal/exception safety, endian agreement, and live C++/Python integration tests. P8.2/P8.3/P8.4 remain unverified.
+
+Audit round: 13
+Auditor: Agent B
+Verdict: fail
+Findings: high vLLM connector has no load path, metadata exchange, block extraction, pinned staging, CUDA event ownership, or completion-before-reuse; high SGLang wrapper is not a `HiCacheStorage` subclass and is rejected by the 0.5.19 backend factory, with missing abstract batch methods and host-pool registration; high no Python binding or transport endpoint connects P8.1 Session to either framework; high Qwen2.5-0.5B framework E2E remains absent; medium API record overstated `batch_*_v2` as abstract and needs correction; medium replacement/concurrency tests do not force publication overlap.
+Commands: installed vLLM 0.29.0/SGLang 0.5.19 source inspection; SGLang factory rejection probe; Python 9/9; vLLM C++ 16/16; SGLang C++ 2/2; `git diff --check`.
+Residual risks: Agent A must implement the Session bridge, actual vLLM scheduler/worker GPU ownership, SGLang `HiCacheStorage` backend registration and host-pool transfer/cancellation, then run real Qwen2.5-0.5B E2E. P8.2/P8.3 remain [~].
+
+Audit round: 12
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM paged GPU injection/CUDA event synchronization/DMA cancellation remain absent; critical real SGLang 0.5.19 registration/radix/GPU/transport cancellation remain absent; high Qwen2.5-0.5B framework E2E remains unmet. Low: `wait_for_save` at-most-once-per-invocation, replacement drain, concurrent suppression, and failure-followed-by-finish retry all passed bounded checks.
+Commands: Python unittest 9/9; vLLM C++ 16/16; SGLang C++ 2/2; `git diff --check`; permanent-failure/concurrent-wait probe under `timeout 10` completed with four returned errors and no hang.
+Residual risks: P8.2/P8.3/P8.4 remain [~] pending real framework/GPU integration and Qwen2.5-0.5B service-level E2E.
+
+Audit round: 11
+Auditor: Agent B
+Verdict: fail
+Findings: high `wait_for_save` retries a failed callback indefinitely in one invocation and can hang the caller; critical real vLLM GPU injection/CUDA cancellation remains absent; critical real SGLang registration/radix/GPU/transport cancellation remains absent; high Qwen2.5-0.5B framework E2E remains absent; medium replacement-drain, concurrent-wait, and failure-followed-by-finish regressions were not completed because the bounded probe hung.
+Commands: Python unittest 6/6; C++ build passed; `git diff --check`; bounded failure/replacement/concurrency probe timed out after 120 seconds.
+Residual risks: bound failed callback handling to one attempt per wait call, add the missing deterministic regressions, rerun focused C++ binaries independently, and complete real framework/GPU E2E. P8.2-P8.4 remain [~].
+
+Audit round: 10
+Auditor: Agent B
+Verdict: fail
+Findings: high `request_finished` still deletes an unfinished non-saving transaction before publication, preventing a late retry; medium framework callback routing still depends on current ContextVar when no request ID is supplied; medium replacement publication requires a later wait call for liveness; low automated regressions for replacement, duplicate waits, interleaved routing, and finish-before-save are absent.
+Commands: Python unittest 4/4; C++ focused ctest 18/18; bounded replacement/duplicate/failure-finish probes; `git diff --check`.
+Residual risks: real vLLM GPU injection/CUDA cancellation, SGLang runtime registration/radix/GPU/transport cancellation, and Qwen2.5-0.5B framework E2E remain unverified. P8.2/P8.3 remain [~]; fix request_finished retry state and add deterministic regressions before another audit.
+
+Audit round: 9
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM paged GPU injection/CUDA cancellation and real SGLang registration/radix/GPU transfer remain absent; high Qwen2.5-0.5B framework E2E remains absent; high replacement transactions can publish using stale keys; high concurrent waiters can poison `_saving`; high callback failures remain invisible and `request_finished` deletes retry state; high actual framework callbacks still use the latest ContextVar and cannot route same-context interleaved requests; high SGLang deadline handling cannot interrupt synchronous transport; medium regression tests do not cover these reproduced cases.
+Commands: Python unittest 4/4; C++ vLLM 16/16; SGLang 2/2; bounded threading/event probes for replacement and concurrent waits; mocked-clock late lease probe; `git diff --check`.
+Residual risks: Agent A owns transaction identity/state-machine/routing fixes and real vLLM GPU integration under P8.2, SGLang transport cancellation and runtime integration under P8.3, and Qwen2.5-0.5B framework E2E under P8.4. P8.2/P8.3 remain [~].
+
+Round 8 remediation (2026-09-14): added per-request `save_kv_layer_for_request`, a `_saving` set and identity check to prevent duplicate completion or deletion of replacement transactions; callback failures remain retryable and are isolated per transaction. SGLang late deadline results now release a returned lease. Tests use explicit public request setup and assert callback invocation/payload outside production exception handling. Python discovery 4/4 and diff check pass; C++ focused results remain vLLM 16/16 and SGLang 2/2. Real GPU/framework E2E remains unverified.
+Changed files: python/kvstore_vllm/connector.py, python/kvstore_sglang/hicache.py, tests/python/test_runtime_adapters.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v`; C++ vLLM/SGLang focused tests; `git diff --check`.
+Test result: Python 4/4, vLLM 16/16, SGLang 2/2 passed. No completion claim.
+
+Audit round: 8
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM GPU injection/CUDA cancellation and SGLang runtime/radix/GPU integration remain absent; high Qwen framework E2E remains absent; high ContextVar does not route interleaved requests in one context; high concurrent wait_for_save duplicates publication and old completion deletes replacement transactions; high swallowed callback exceptions hide failure and finish discards retry state; high late SGLang lookup discards returned leases without release and cannot interrupt transport; medium callback assertions are swallowed by production exception handling, weakening the passing Python test evidence.
+Commands: Python discovery 4/4; rebuilt C++ focused ctest 18/18; independent bounded barrier/context/replacement/failure/mocked-clock reproductions; `git diff --check`.
+Residual risks: all listed findings require implementation remediation, regression tests, and another independent audit. P8.2/P8.3 remain [~]. Current Python callback wrappers are not ready for framework acceptance or production use.
+
+Audit round: 7
+Auditor: Agent B
+Verdict: fail
+Findings: critical real vLLM paged GPU block injection, CUDA event synchronization, and DMA cancellation remain absent; critical real SGLang 0.5.19 runtime registration, radix integration, and GPU transfer remain absent; high vLLM `_active_request_id` is process-wide and cannot safely disambiguate interleaved requests; high save completion/failure state is not per-request atomic; high SGLang deadline/cancellation cannot interrupt a blocked transport; high Qwen2.5-0.5B framework E2E remains absent; low prefix entries lack full metadata compatibility validation.
+Commands: Python unittest discovery 3/3; C++ focused suites 18/18; `git diff --check`; independent source and diff review.
+Residual risks: P8.2 remains blocked by real vLLM GPU integration, concurrent request routing, and transport wiring. P8.3 remains blocked by real SGLang registration, radix/GPU path, and cancellation/timeout propagation. P8.4 remains blocked by Qwen2.5-0.5B framework E2E. P8.2/P8.3 stay [~].
 ```
 
 ---

@@ -1,6 +1,6 @@
 build/
 build-*/
-.venv/
+.venv**/
 .cache/
 compile_commands.json
 Testing/
