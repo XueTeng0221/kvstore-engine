@@ -109,6 +109,29 @@ class RuntimeAdapterTest(unittest.TestCase):
         connector.wait_for_save()
         self.assertEqual(len(calls), 1)
 
+    def test_scheduler_metadata_initializes_worker_publication(self):
+        from kvstore_vllm import KVStoreConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True, kv_connector_extra_config={}
+            ),
+            cache_config=SimpleNamespace(block_size=16),
+        )
+        scheduler = KVStoreConnector(config, KVConnectorRole.SCHEDULER, None)
+        worker = KVStoreConnector(config, KVConnectorRole.WORKER, None)
+        request = SimpleNamespace(request_id="framework", prompt_token_ids=list(range(16)))
+        self.assertTrue(scheduler.request_finished(request, [3])[0])
+        metadata = scheduler.build_connector_meta(None)
+        worker.bind_connector_metadata(metadata)
+        worker.start_load_kv(None)
+        calls = []
+        worker.bind_store(lambda key, payload: calls.append((key, payload)))
+        worker.save_kv_layer_for_request("framework", "layer", "value")
+        worker.wait_for_save()
+        self.assertEqual(calls, [(tuple(range(16)), {"layer": "value"})])
+
     def _connector_with_calls(self):
         from kvstore_vllm import KVStoreConnector
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole

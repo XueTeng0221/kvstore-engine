@@ -1177,7 +1177,7 @@ Test result: daemon enabled and host API responsive. GPU smoke could not start: 
 Follow-up: P8.2/P8.3 Owner Agent A: enable native WSL Docker integration if needed, resolve approved registry/proxy access and rerun GPU container smoke before framework acceptance. Do not claim GPU readiness or M7 completion.
 ```
 
-### [~] P8.2 vLLM adapter
+### [!] P8.2 vLLM adapter
 
 Round 17 fail remediation / audit18 preparation (2026-09-14): Owner Agent A; dependencies P8.1 and existing UDS bridge. Scope: NUL validation before socket allocation, CTest missing-protobuf hard failure, bounded deterministic concurrent C++ Start/Stop fixture, socket cleanup, and actual Debug/ASAN/TSAN verification using .venv-vllm Python. No framework changes or audit verdict. Acceptance: full Debug and verbose live sanitizer runs with zero skips; dependency-negative and lifecycle regressions pass. Status remains [~], pending independent Agent B audit18.
 Evidence correction: round 16's ASAN 0.07s and TSAN 0.06s CTest successes did not establish live execution: the loader could skip all tests when protobuf was absent. Those sanitizer coverage/no-report claims are withdrawn; replacement results will be recorded after actual execution.
@@ -1196,14 +1196,14 @@ Resume inspection (2026-09-13): Owner Agent A (resumed implementation context), 
 - [ ] prefill 后异步发布可复用 KV，并在请求取消时清理 reservation
 - [ ] 集成测试覆盖 miss、partial hit、full hit、超时和 server 重启
 
-### [~] P8.3 SGLang adapter
+### [!] P8.3 SGLang adapter
 
 - [ ] 固定支持的 SGLang 版本和 radix/prefix cache 边界
 - [ ] 映射 SGLang prefix/radix 元数据到 canonical cache key
 - [ ] 实现读取、发布、释放和失败回退
 - [ ] 集成测试覆盖 miss、partial hit、full hit、超时和 server 重启
 
-### [ ] P8.4 端到端计算节省评估
+### [!] P8.4 端到端计算节省评估
 
 - [ ] 建立固定模型、GPU、prompt 数据集、并发度和输出长度基线
 - [ ] 分别测量 cold miss、disk hit、memory prefix hit、memory full hit
@@ -1241,6 +1241,44 @@ Findings: medium real vLLM 0.29.0 KVConnectorBase_V1/runtime and block-manager c
 Commands: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DKVSTORE_BUILD_TESTS=ON`; `cmake --build build --target kvstore_vllm_tests -j2`; `./build/tests/integration/vllm/kvstore_vllm_tests --gtest_color=no`; `git diff --check`
 Test result: isolated vLLM target and 16/16 tests passed. Tests cover miss/partial/full hit, exact/prefix lookup, metadata and block safety rejection, deadline/cancellation, remote timeout, lost acknowledgement, persistence rehydration, publication cleanup and reconnect lookup. Whole build/test is not claimed because the unrelated SGLang test fails `-Werror=missing-field-initializers`.
 Residual risks: P8.2/P8.4, Owner Agent A: validate actual vLLM 0.29.0 KVConnectorBase_V1, GPU block injection, pinned CPU staging/CUDA event cancellation and performance on Qwen2.5-0.5B. P8.3, Owner Agent A: fix SGLang test warning and obtain independent audit. P10.1 tracks the broader integration matrix. P8.2 remains [~] and acceptance boxes remain unchecked.
+```
+
+---
+
+```text
+Implementation round 2026-09-15: P8.2/P8.3/P8.4 Agent A
+Changed files: python/kvstore_vllm/connector.py, python/kvstore_vllm/uds.py, python/kvstore_sglang/hicache.py, tests/python/test_vllm_gpu_runtime.py, tests/python/test_sglang_runtime_real.py, todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_vllm_gpu_runtime -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -p 'test_uds_transport.py' -v`; `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; real vLLM and SGLang Qwen2.5-0.5B startup probes.
+Test result: vLLM real CUDA paged H2D/D2H/event/cancellation 2/2; UDS transport 3/3; SGLang dynamic factory/HiCache page tests 2/2. vLLM service stops before callbacks with `RuntimeError: UVA is not available`; SGLang service stops before backend registration because 7.6 GiB host RAM is below its fixed 10 GiB HiCache reserve. No framework-level E2E completion claim.
+P8.4 status: framework miss/partial/full hit, publication, timeout, cancellation, restart and performance matrix remains blocked and must be rerun on a UVA-capable vLLM runtime plus sufficient-host-RAM SGLang machine.
+Audit round: pending independent Agent B
+Verdict: pending
+Residual risks: real service callbacks and performance evidence remain unverified; P8.2-P8.4 stay [~].
+
+Audit round: 2
+Auditor: Agent B
+Verdict: fail
+Findings: critical vLLM framework publication and transport wiring absent; critical SGLang backend used process-local pages instead of KVStore; high partial-hit block count, cancellation, per-layer event ownership, SGLang interface_v1 and v2 indices incorrect; medium tests were synthetic and P8.4 startup evidence was incomplete.
+Commands: focused Python suites plus installed vLLM/SGLang API inspection and contract reproductions.
+Residual risks: all findings require remediation; P8.2-P8.4 remain [~].
+
+Audit round: 3
+Auditor: Agent B
+Verdict: fail
+Findings: critical separate vLLM scheduler/worker instances did not initialize worker publication; high SessionTransport cancellation signature/adapter contract mismatch, global layer events, completion tracking, SGLang v1/v2 page semantics; medium partial-hit offset and synchronous deadline limitations; P8.4 remains blocked before framework callbacks.
+Commands: vLLM 2/2 GPU, SGLang 2/2 factory, UDS 3/3 and runtime adapter 9/9 plus focused reproductions.
+Residual risks: real UDS protobuf operation binding, concurrent per-request event ownership, auxiliary-pool policy and framework E2E remain pending.
+
+Round 3 remediation: scheduler metadata now carries immutable save token IDs/block IDs and initializes worker transactions; completion retains transfer ownership until get_finished; load tracks all layer events; cancellation signature matches SessionTransport; SGLang v1/v2 flattened host indices use page boundaries and short input fails safely. Added scheduler-worker publication and v1 flattened-index regressions.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `git diff --check`.
+Test result: vLLM 12/12 passed including 2 real CUDA tests; SGLang 3/3 passed; diff check passed. Audit round 4 requested; no completion claim.
+
+Audit round: 4
+Auditor: Agent B unavailable
+Verdict: no verdict
+Findings: three independent audit invocations returned empty reports and therefore cannot be counted as pass or pass-with-risk.
+Commands: affected C++ integration targets built; focused CTest `VllmAdapter|SglangHiCache|UdsTransport|UdsBridgeLive|IntegrationMockClient` 21/21 passed; Python vLLM 12/12 and SGLang 3/3 passed; `git diff --check` passed.
+Residual risks: P8.2 lacks a production protobuf Session operation binding from framework configuration; P8.3 real service callback remains blocked before backend registration; P8.4 has no framework performance matrix. Blocking conditions: vLLM 0.29.0 V1 requires UVA unavailable in this runtime; SGLang 0.5.19 HiCache reserves 10 GiB host RAM while this host has 7.6 GiB. P8.2-P8.4 are [!] until these conditions are removed and independent audit returns pass or pass-with-risk.
 ```
 
 ---
