@@ -1,6 +1,7 @@
 #include "kvstore/engine/array_engine.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <unordered_set>
 
@@ -163,6 +164,18 @@ Status ArrayEngine::Import(const std::vector<Entry>& entries, std::stop_token st
 std::size_t ArrayEngine::Size() const {
   std::shared_lock lock(mutex_);
   return entries_.size();
+}
+
+Result<std::size_t> ArrayEngine::DataBytes() const {
+  std::shared_lock lock(mutex_);
+  std::size_t bytes = 0;
+  for (const auto& entry : entries_) {
+    if (entry.key.size() > std::numeric_limits<std::size_t>::max() - bytes ||
+        entry.value.size() > std::numeric_limits<std::size_t>::max() - bytes - entry.key.size())
+      return Status{StatusCode::kLimitExceeded, "engine data size overflow"};
+    bytes += entry.key.size() + entry.value.size();
+  }
+  return bytes;
 }
 
 }  // namespace kvstore

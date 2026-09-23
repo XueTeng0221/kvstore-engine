@@ -13,6 +13,8 @@
 #include "kvstore/persistence/aof.hpp"
 #include "kvstore/persistence/snapshot.hpp"
 #include "kvstore/persistence/write_event_queue.hpp"
+#include "kvstore/replication/backlog.hpp"
+#include "kvstore/replication/executor.hpp"
 #include "kvstore/version.hpp"
 
 namespace {
@@ -116,6 +118,7 @@ int main(int argc, char** argv) {
         std::max(snapshot_offset.value().event_id, aof ? aof->last_event_id() : 0U);
   }
   std::unique_ptr<kvstore::WriteEventQueue> event_queue;
+  kvstore::ReplicationBacklog replication_backlog;
   if (aof)
     event_queue = std::make_unique<kvstore::WriteEventQueue>(
         std::max(config.value().persistence.flush_records,
@@ -124,23 +127,33 @@ int main(int argc, char** argv) {
         [&aof](const std::vector<kvstore::WriteEvent>& events) {
           return aof->AppendBatch(events);
         });
-  kvstore::EventSink event_sink;
-  if (event_queue)
-    event_sink = [&event_queue](const kvstore::WriteEvent& event) {
-      return event_queue->Submit(event);
-    };
+  kvstore::EventSink event_sink = [&event_queue,
+                                   &replication_backlog](const kvstore::WriteEvent& event) {
+    const auto persistence = event_queue ? event_queue->Submit(event) : kvstore::Status::Ok();
+    if (!persistence.ok()) return persistence;
+    return replication_backlog.Append({event});
+  };
   kvstore::Dispatcher dispatcher(std::move(engine).value(), std::move(event_sink), {}, {},
                                  recovered_offset + 1, recovered_event_id + 1,
                                  config.value().replication.node_id);
-  if (event_queue)
-    dispatcher.SetContextEventSinks(
-        [&event_queue](const kvstore::WriteEvent& event, const kvstore::RequestContext& context) {
-          return event_queue->Submit(event, context.deadline, context.stop);
-        },
-        [&event_queue](const std::vector<kvstore::WriteEvent>& events,
-                       const kvstore::RequestContext& context) {
-          return event_queue->SubmitBatch(events, context.deadline, context.stop);
-        });
+  dispatcher.SetReadOnly(config.value().replication.role == "replica");
+  dispatcher.SetContextEventSinks(
+      [&event_queue, &replication_backlog](const kvstore::WriteEvent& event,
+                                           const kvstore::RequestContext& context) {
+        const auto persistence = event_queue
+                                     ? event_queue->Submit(event, context.deadline, context.stop)
+                                     : kvstore::Status::Ok();
+        if (!persistence.ok()) return persistence;
+        return replication_backlog.Append({event});
+      },
+      [&event_queue, &replication_backlog](const std::vector<kvstore::WriteEvent>& events,
+                                           const kvstore::RequestContext& context) {
+        const auto persistence =
+            event_queue ? event_queue->SubmitBatch(events, context.deadline, context.stop)
+                        : kvstore::Status::Ok();
+        if (!persistence.ok()) return persistence;
+        return replication_backlog.Append(events);
+      });
   const auto recovery_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                         std::chrono::steady_clock::now() - recovery_started)
                                         .count();
@@ -151,10 +164,12 @@ int main(int argc, char** argv) {
            "\r\nrecovery_event_id:" + std::to_string(recovered_event_id) +
            "\r\nrecovery_duration_ms:" + std::to_string(recovery_duration_ms) + "\r\n";
   });
-  if (event_queue)
-    dispatcher.SetBatchEventSink([&event_queue](const std::vector<kvstore::WriteEvent>& events) {
-      return event_queue->SubmitBatch(events);
-    });
+  dispatcher.SetBatchEventSink([&event_queue, &replication_backlog](
+                                   const std::vector<kvstore::WriteEvent>& events) {
+    const auto persistence = event_queue ? event_queue->SubmitBatch(events) : kvstore::Status::Ok();
+    if (!persistence.ok()) return persistence;
+    return replication_backlog.Append(events);
+  });
   if (config.value().persistence.snapshot_enabled)
     dispatcher.SetManagementActions(
         [&dispatcher, &persistence_directory, &config]() {
@@ -169,8 +184,30 @@ int main(int argc, char** argv) {
                     kvstore::Snapshot::Load(persistence_directory, dispatcher.engine());
                 return loaded.ok() ? kvstore::Status::Ok() : loaded.status();
               }});
-  kvstore::EpollServer server(config.value().server, config.value().protocol, dispatcher,
-                              config.value().network.epoll_max_events);
+  kvstore::ReplicationExecutorOptions executor_options;
+  executor_options.queue_capacity = config.value().server.max_inflight_requests;
+  executor_options.reactor_post = [](std::function<void()> task) {
+    task();
+    return kvstore::Status::Ok();
+  };
+  executor_options.proactor_submit =
+      [](std::function<void()> task, kvstore::ProactorReplicationExecutor::Completion completion) {
+        task();
+        completion();
+        return kvstore::Status::Ok();
+      };
+  auto replication_executor = kvstore::CreateReplicationExecutor(config.value().replication.backend,
+                                                                 std::move(executor_options));
+  if (!replication_executor.ok()) {
+    std::cerr << replication_executor.status().name() << ": "
+              << replication_executor.status().message() << '\n';
+    return 1;
+  }
+  kvstore::EpollServer server(
+      config.value().server, config.value().protocol, dispatcher, config.value().replication.role,
+      config.value().replication.node_id, config.value().replication.upstream.value_or(""),
+      &replication_backlog, config.value().replication.heartbeat_interval_ms,
+      config.value().network.epoll_max_events, replication_executor.value().get());
   g_server = &server;
   std::signal(SIGINT, StopServer);
   std::signal(SIGTERM, StopServer);

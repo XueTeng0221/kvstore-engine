@@ -80,6 +80,17 @@ TEST(ProtocolTest, DispatcherUsesRedisOverwriteAndTypedResponses) {
       "$2\r\nOK\r\n");
 }
 
+TEST(ProtocolTest, ReplicaDispatcherRejectsWritesButServesReads) {
+  Dispatcher dispatcher(std::make_unique<HashEngine>(16));
+  dispatcher.SetReadOnly(true);
+  const auto write = dispatcher.Execute({CommandType::kSet, {"key", "value"}});
+  EXPECT_FALSE(write.ok);
+  EXPECT_EQ(write.error, "READ_ONLY replica is read-only");
+  const auto read = dispatcher.Execute({CommandType::kGet, {"key"}});
+  EXPECT_FALSE(read.ok);
+  EXPECT_EQ(read.error, "NOT_FOUND key not found");
+}
+
 TEST(ProtocolTest, DispatcherRollsBackWhenEventSinkFails) {
   Dispatcher dispatcher(std::make_unique<HashEngine>(16), [](const WriteEvent&) {
     return Status{StatusCode::kIoError, "sink failed"};

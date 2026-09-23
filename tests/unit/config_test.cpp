@@ -62,6 +62,54 @@ TEST(ConfigTest, RejectsReplicaWithoutUpstream) {
   EXPECT_NE(result.status().message().find("upstream"), std::string_view::npos);
 }
 
+TEST(ConfigTest, RejectsMalformedReplicationUpstream) {
+  auto json = DefaultJson();
+  json["replication"]["role"] = "replica";
+  for (const auto* upstream : {"localhost:6380", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:abc"}) {
+    json["replication"]["upstream"] = upstream;
+    const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+    EXPECT_FALSE(result.ok()) << upstream;
+    EXPECT_NE(result.status().message().find("$.replication.upstream"), std::string_view::npos);
+  }
+}
+
+TEST(ConfigTest, BoundsReplicationHeartbeatIntervalBeforeDurationConversion) {
+  auto json = DefaultJson();
+  const auto max_safe = std::numeric_limits<std::int64_t>::max() / 3;
+  json["replication"]["heartbeat_interval_ms"] = max_safe;
+  EXPECT_TRUE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+  json["replication"]["heartbeat_interval_ms"] = max_safe + 1;
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+}
+
+TEST(ConfigTest, AcceptsImplementedReplicationExecutorsAndRejectsUnknown) {
+  auto json = DefaultJson();
+  for (const auto* backend : {"pthread", "reactor", "proactor", "ntyco"}) {
+    json["replication"]["backend"] = backend;
+    const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+    EXPECT_TRUE(result.ok()) << backend;
+  }
+  json["replication"]["backend"] = "unknown";
+  const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+  ASSERT_FALSE(result.ok());
+  EXPECT_NE(result.status().message().find("$.replication.backend"), std::string_view::npos);
+}
+
+TEST(ConfigTest, RejectsOutputBufferTooSmallForReplicationFrameReserve) {
+  auto json = DefaultJson();
+  json["protocol"]["max_key_bytes"] = 1;
+  json["protocol"]["max_value_bytes"] = 1;
+  json["protocol"]["max_frame_bytes"] = 1024;
+  json["server"]["max_output_buffer_bytes"] = 1062;
+  json["server"]["output_high_watermark_bytes"] = 1000;
+  const auto rejected = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_NE(rejected.status().message().find("replication chunk"), std::string_view::npos);
+  json["server"]["max_output_buffer_bytes"] = 1063;
+  json["server"]["output_high_watermark_bytes"] = 1000;
+  EXPECT_TRUE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
+}
+
 TEST(ConfigTest, RejectsWrongTypeAndConflictingFrameLimit) {
   auto json = DefaultJson();
   json["server"]["port"] = "6380";

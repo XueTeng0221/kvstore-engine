@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -53,6 +54,12 @@ struct WriteEvent {
   std::uint32_t checksum{};
 };
 
+struct ReplicationSnapshotView {
+  std::vector<Entry> entries;
+  std::uint64_t offset{};
+  std::uint64_t event_id{};
+};
+
 using EventSink = std::function<Status(const WriteEvent&)>;
 using BatchEventSink = std::function<Status(const std::vector<WriteEvent>&)>;
 using ContextEventSink = std::function<Status(const WriteEvent&, const RequestContext&)>;
@@ -73,10 +80,14 @@ class Dispatcher {
     context_batch_sink_ = std::move(batch_sink);
   }
   void SetInfoProvider(InfoProvider provider) { info_provider_ = std::move(provider); }
+  void SetReadOnly(bool read_only) noexcept { read_only_ = read_only; }
   [[nodiscard]] CommandResponse Execute(const Command& command, const RequestContext& context = {});
   [[nodiscard]] IEngine& engine() noexcept { return *engine_; }
   [[nodiscard]] std::uint64_t next_offset() const noexcept { return next_offset_; }
   [[nodiscard]] std::uint64_t next_event_id() const noexcept { return next_event_id_; }
+  [[nodiscard]] Result<ReplicationSnapshotView> SnapshotView(
+      std::size_t max_serialized_bytes = std::numeric_limits<std::size_t>::max());
+  void SetReplicationPoint(std::uint64_t offset, std::uint64_t event_id);
 
  private:
   [[nodiscard]] CommandResponse Error(Status status) const;
@@ -98,6 +109,7 @@ class Dispatcher {
   std::uint64_t next_offset_{1};
   std::uint64_t next_event_id_{1};
   std::string origin_node_;
+  bool read_only_{false};
 };
 
 }  // namespace kvstore

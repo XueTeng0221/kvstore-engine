@@ -1,5 +1,6 @@
 #include "kvstore/engine/rbtree_engine.hpp"
 
+#include <limits>
 #include <mutex>
 
 #include "engine_util.hpp"
@@ -385,6 +386,19 @@ Status RBTreeEngine::Import(const std::vector<Entry>& entries, std::stop_token s
 std::size_t RBTreeEngine::Size() const {
   std::shared_lock lock(mutex_);
   return nodes_.size();
+}
+
+Result<std::size_t> RBTreeEngine::DataBytes() const {
+  std::shared_lock lock(mutex_);
+  std::size_t bytes = 0;
+  for (const auto& [node, owner] : nodes_) {
+    static_cast<void>(node);
+    if (owner->key.size() > std::numeric_limits<std::size_t>::max() - bytes ||
+        owner->value.size() > std::numeric_limits<std::size_t>::max() - bytes - owner->key.size())
+      return Status{StatusCode::kLimitExceeded, "engine data size overflow"};
+    bytes += owner->key.size() + owner->value.size();
+  }
+  return bytes;
 }
 
 int RBTreeEngine::ValidateNode(const Node* node, const std::string* minimum,

@@ -42,6 +42,7 @@ class IEngine {
   [[nodiscard]] virtual Status Import(const std::vector<Entry>& entries,
                                       std::stop_token stop = {}) = 0;
   [[nodiscard]] virtual std::size_t Size() const = 0;
+  [[nodiscard]] virtual Result<std::size_t> DataBytes() const = 0;
   [[nodiscard]] virtual std::size_t Capacity() const noexcept = 0;
   [[nodiscard]] virtual std::string_view Name() const noexcept = 0;
 };

@@ -40,6 +40,27 @@ Dispatcher::Dispatcher(std::unique_ptr<IEngine> engine, EventSink sink, Manageme
       next_event_id_(initial_event_id),
       origin_node_(std::move(origin_node)) {}
 
+Result<ReplicationSnapshotView> Dispatcher::SnapshotView(std::size_t max_serialized_bytes) {
+  std::scoped_lock lock(mutex_);
+  const auto data_bytes = engine_->DataBytes();
+  if (!data_bytes.ok()) return data_bytes.status();
+  const auto count = engine_->Size();
+  if (count > (std::numeric_limits<std::size_t>::max() - 20U) / 8U ||
+      data_bytes.value() > std::numeric_limits<std::size_t>::max() - 20U - count * 8U ||
+      20U + count * 8U + data_bytes.value() > max_serialized_bytes)
+    return Status{StatusCode::kLimitExceeded, "replication snapshot exceeds transfer limit"};
+  auto entries = engine_->Export();
+  if (!entries.ok()) return entries.status();
+  return ReplicationSnapshotView{std::move(entries).value(), next_offset_ - 1U,
+                                 next_event_id_ - 1U};
+}
+
+void Dispatcher::SetReplicationPoint(std::uint64_t offset, std::uint64_t event_id) {
+  std::scoped_lock lock(mutex_);
+  next_offset_ = offset + 1U;
+  next_event_id_ = event_id + 1U;
+}
+
 void Dispatcher::SetManagementActions(ManagementAction save, ManagementAction load) {
   save_ = std::move(save);
   load_ = std::move(load);
@@ -123,6 +144,12 @@ CommandResponse Dispatcher::Execute(const Command& command, const RequestContext
   if (context.stop.stop_requested()) return Invalid("CANCELLED request cancelled");
   if (std::chrono::steady_clock::now() >= context.deadline)
     return Invalid("CANCELLED request deadline exceeded");
+  const bool mutates = command.type == CommandType::kSet || command.type == CommandType::kMod ||
+                       command.type == CommandType::kDel || command.type == CommandType::kDelMany ||
+                       command.type == CommandType::kIncr || command.type == CommandType::kDecr ||
+                       command.type == CommandType::kIncrBy ||
+                       command.type == CommandType::kDecrBy || command.type == CommandType::kLoad;
+  if (read_only_ && mutates) return Error({StatusCode::kReadOnly, "replica is read-only"});
   const auto arity = command.args.size();
   switch (command.type) {
     case CommandType::kSet:

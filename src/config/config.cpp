@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -124,6 +125,13 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   constexpr std::size_t kResponseOverhead = 128;
   if (config.server.max_output_buffer_bytes < config.protocol.max_value_bytes + kResponseOverhead)
     return Invalid("$.server.max_output_buffer_bytes", "must cover one maximum response");
+  constexpr std::size_t replication_control_reserve = 1024U;
+  constexpr std::size_t replication_chunk_overhead = 13U + 25U;
+  if (config.server.max_output_buffer_bytes <=
+      replication_control_reserve + replication_chunk_overhead) {
+    return Invalid("$.server.max_output_buffer_bytes",
+                   "must leave room for a replication chunk and control reserve");
+  }
   if (!OneOf(config.engine.type, {"array", "rbtree", "hash", "skiplist"})) {
     return Invalid("$.engine.type", "unknown engine");
   }
@@ -187,13 +195,29 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   if (config.replication.role == "replica" && !config.replication.upstream.has_value()) {
     return Invalid("$.replication.upstream", "replica requires upstream");
   }
-  if (config.replication.role == "replica")
-    return Invalid("$.replication.role", "replica mode is not implemented");
+  if (config.replication.upstream.has_value()) {
+    const auto& upstream = *config.replication.upstream;
+    const auto separator = upstream.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator + 1U >= upstream.size())
+      return Invalid("$.replication.upstream", "must be IPv4:port");
+    in_addr upstream_address{};
+    if (::inet_pton(AF_INET, upstream.substr(0, separator).c_str(), &upstream_address) != 1)
+      return Invalid("$.replication.upstream", "host must be a valid IPv4 address");
+    std::uint32_t port = 0;
+    const auto port_text = upstream.substr(separator + 1U);
+    const auto parsed =
+        std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
+    if (parsed.ec != std::errc{} || parsed.ptr != port_text.data() + port_text.size() ||
+        port == 0 || port > std::numeric_limits<std::uint16_t>::max())
+      return Invalid("$.replication.upstream", "port must be in range 1..65535");
+  }
   if (config.replication.backlog_slots != 1024) {
     return Invalid("$.replication.backlog_slots", "v0.1 requires exactly 1024 slots");
   }
   if (config.replication.handshake_timeout_ms == 0 ||
-      config.replication.heartbeat_interval_ms == 0) {
+      config.replication.heartbeat_interval_ms == 0 ||
+      config.replication.handshake_timeout_ms > kMaxMilliseconds ||
+      config.replication.heartbeat_interval_ms > kMaxMilliseconds / 3U) {
     return Invalid("$.replication", "handshake and heartbeat intervals must be positive");
   }
   if (!OneOf(config.replication.backend, {"pthread", "reactor", "proactor", "ntyco"})) {

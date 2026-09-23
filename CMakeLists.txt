@@ -5,6 +5,20 @@ project(kvstore_engine VERSION 0.1.0 LANGUAGES CXX)
 include(FetchContent)
 include(CTest)
 
+set(KVSTORE_FETCHCONTENT_MIRROR "" CACHE STRING
+    "Optional GitHub mirror base URL, used after the canonical URL fails")
+
+function(kvstore_github_urls output original)
+  set(urls "${original}")
+  if(KVSTORE_FETCHCONTENT_MIRROR)
+    string(REGEX REPLACE "/$" "" mirror "${KVSTORE_FETCHCONTENT_MIRROR}")
+    string(REPLACE "https://github.com" "${mirror}" fallback "${original}")
+    string(REPLACE "https://codeload.github.com" "${mirror}" fallback "${fallback}")
+    list(APPEND urls "${fallback}")
+  endif()
+  set(${output} "${urls}" PARENT_SCOPE)
+endfunction()
+
 option(KVSTORE_BUILD_TESTS "Build tests" ON)
 option(KVSTORE_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(KVSTORE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
@@ -49,18 +63,14 @@ if(KVSTORE_SANITIZERS)
   target_link_options(kvstore_options INTERFACE -fsanitize=${_sanitizers} -fno-omit-frame-pointer)
 endif()
 
-FetchContent_Declare(
-  nlohmann_json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
-)
+kvstore_github_urls(JSON_URLS "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz")
+FetchContent_Declare(nlohmann_json URL ${JSON_URLS}
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d)
 FetchContent_MakeAvailable(nlohmann_json)
 
-FetchContent_Declare(
-  picosha2
-  URL https://github.com/okdshin/PicoSHA2/archive/refs/tags/v1.0.1.tar.gz
-  URL_HASH SHA256=9983136544234e573fe07cc1a22fdf978ad7979043e7be2e9082f6d4991ff8a8
-)
+kvstore_github_urls(PICOSHA2_URLS "https://github.com/okdshin/PicoSHA2/archive/refs/tags/v1.0.1.tar.gz")
+FetchContent_Declare(picosha2 URL ${PICOSHA2_URLS}
+  URL_HASH SHA256=9983136544234e573fe07cc1a22fdf978ad7979043e7be2e9082f6d4991ff8a8)
 set(PICOSHA2_TEST OFF CACHE BOOL "" FORCE)
 set(PICOSHA2_EXAMPLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(picosha2)
@@ -69,8 +79,9 @@ FetchContent_MakeAvailable(picosha2)
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
+kvstore_github_urls(PROTOBUF_URLS "https://codeload.github.com/protocolbuffers/protobuf/tar.gz/refs/tags/v21.12")
 FetchContent_Declare(protobuf
-  URL https://codeload.github.com/protocolbuffers/protobuf/tar.gz/refs/tags/v21.12
+  URL ${PROTOBUF_URLS}
   URL_HASH SHA256=22fdaf641b31655d4b2297f9981fa5203b2866f8332d3c6333f6b0107bb320de
 )
 FetchContent_MakeAvailable(protobuf)
@@ -149,6 +160,12 @@ add_library(kvstore_engine_lib
   src/protocol/native.cpp
   src/protocol/batch.cpp
   src/net/epoll_server.cpp
+  src/replication/handshake.cpp
+  src/replication/backlog.cpp
+  src/replication/sync.cpp
+  src/replication/frame.cpp
+  src/replication/live_sync.cpp
+  src/replication/executor.cpp
 )
 target_include_directories(kvstore_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(kvstore_engine_lib PUBLIC kvstore_common kvstore_options)
@@ -168,11 +185,9 @@ target_link_libraries(kvstore_server PRIVATE kvstore_common kvstore_engine_lib k
 
 if(KVSTORE_BUILD_TESTS)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  FetchContent_Declare(
-    googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
-    URL_HASH SHA256=7b42b4d6ed48810c5362c265a17faebe90dc2373c885e5216439d37927f02926
-  )
+  kvstore_github_urls(GTEST_URLS "https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz")
+  FetchContent_Declare(googletest URL ${GTEST_URLS}
+    URL_HASH SHA256=7b42b4d6ed48810c5362c265a17faebe90dc2373c885e5216439d37927f02926)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
   include(GoogleTest)
@@ -202,6 +217,7 @@ if(KVSTORE_BUILD_TESTS)
     tests/unit/kvcache_policy_test.cpp
     tests/unit/kvcache_request_path_test.cpp
     tests/unit/integration_protocol_test.cpp
+    tests/unit/replication_test.cpp
     tests/unit/sglang_hicache_storage_test.cpp
   )
   target_link_libraries(kvstore_unit_tests PRIVATE kvstore_common kvstore_engine_lib kvstore_kvcache kvstore_integration GTest::gtest_main kvstore_options)
@@ -228,4 +244,6 @@ if(KVSTORE_BUILD_BENCHMARKS)
   target_link_libraries(kvcache_match_benchmark PRIVATE kvstore_kvcache kvstore_options)
   add_executable(kvcache_policy_benchmark benchmarks/kvcache_policy_benchmark.cpp)
   target_link_libraries(kvcache_policy_benchmark PRIVATE kvstore_kvcache kvstore_options)
+  add_executable(replication_executor_benchmark benchmarks/replication_executor_benchmark.cpp)
+  target_link_libraries(replication_executor_benchmark PRIVATE kvstore_engine_lib kvstore_options)
 endif()

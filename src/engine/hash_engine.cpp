@@ -1,6 +1,7 @@
 #include "kvstore/engine/hash_engine.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 
 #include "engine_util.hpp"
@@ -157,6 +158,18 @@ Status HashEngine::Import(const std::vector<Entry>& entries, std::stop_token sto
 std::size_t HashEngine::Size() const {
   std::shared_lock lock(mutex_);
   return entries_.size();
+}
+
+Result<std::size_t> HashEngine::DataBytes() const {
+  std::shared_lock lock(mutex_);
+  std::size_t bytes = 0;
+  for (const auto& [key, value] : entries_) {
+    if (key.size() > std::numeric_limits<std::size_t>::max() - bytes ||
+        value.size() > std::numeric_limits<std::size_t>::max() - bytes - key.size())
+      return Status{StatusCode::kLimitExceeded, "engine data size overflow"};
+    bytes += key.size() + value.size();
+  }
+  return bytes;
 }
 
 }  // namespace kvstore
