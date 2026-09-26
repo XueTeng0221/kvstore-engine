@@ -42,10 +42,9 @@ void RequestPath::Shutdown() noexcept {
     stopping_ = true;
     abandoned.swap(pending_);
   }
-  for (const auto& [key, operation] : abandoned) {
-    (void)key;
+  for (const auto& [_, operation] : abandoned) {
     operation->stop.request_stop();
-    (void)scheduler_.Cancel(operation->scheduler_id);
+    static_cast<void>(scheduler_.Cancel(operation->scheduler_id));
     Complete(operation, Status{StatusCode::kCancelled, "request path stopped"});
   }
   work_cv_.notify_all();
@@ -80,7 +79,7 @@ void RequestPath::Leave(const std::shared_ptr<Pending>& operation) {
     last = --operation->waiters == 0;
     if (last) {
       // Cancel queued work before a new operation for the same key is admitted.
-      (void)scheduler_.Cancel(operation->scheduler_id);
+      static_cast<void>(scheduler_.Cancel(operation->scheduler_id));
     }
   }
   if (last) {
@@ -111,8 +110,7 @@ void RequestPath::Worker() {
         // remain attached to an unfulfillable future or cause a busy loop.
         failed.swap(pending_);
       } else {
-        for (const auto& [key, candidate] : pending_) {
-          (void)key;
+        for (const auto& [_, candidate] : pending_) {
           if (candidate->scheduler_id == task.value().request.id) {
             operation = candidate;
             break;
@@ -121,9 +119,8 @@ void RequestPath::Worker() {
       }
     }
     if (!task.ok()) {
-      for (const auto& [key, candidate] : failed) {
-        (void)key;
-        (void)scheduler_.Cancel(candidate->scheduler_id);
+      for (const auto& [_, candidate] : failed) {
+        static_cast<void>(scheduler_.Cancel(candidate->scheduler_id));
         candidate->stop.request_stop();
         Complete(candidate, task.status());
       }

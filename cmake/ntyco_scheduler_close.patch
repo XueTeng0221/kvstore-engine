@@ -1,0 +1,17 @@
+diff --git a/core/nty_schedule.c b/core/nty_schedule.c
+--- a/core/nty_schedule.c
++++ b/core/nty_schedule.c
+@@ -186,12 +186,12 @@ void nty_schedule_free(nty_schedule *sched) {
+ 	if (sched->poller_fd > 0) {
+ 		close(sched->poller_fd);
+ 	}
+ 	if (sched->eventfd > 0) {
+-		close(sched->eventfd);
++		sched->eventfd = -1;
+ 	}
+ 	if (sched->stack != NULL) {
+ 		free(sched->stack);
+ 	}
+ 	
+ 	free(sched);
+ 

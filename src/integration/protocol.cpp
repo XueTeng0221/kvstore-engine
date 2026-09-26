@@ -447,8 +447,7 @@ Result<Bytes> Session::Exchange(ByteView bytes) try {
 void Session::Disconnect() noexcept {
   std::lock_guard lock(mutex_);
   for (const auto& r : reservations_) {
-    const auto status = registry_.Abort(r.id);
-    (void)status;
+    static_cast<void>(registry_.Abort(r.id));
   }
   reservations_.clear();
   leases_.clear();

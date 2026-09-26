@@ -1,0 +1,11 @@
+diff --git a/core/nty_schedule.c b/core/nty_schedule.c
+--- a/core/nty_schedule.c
++++ b/core/nty_schedule.c
+@@ -44,6 +44,7 @@
+ 
+ #include "nty_coroutine.h"
++#include <sys/syscall.h>
+ 
+ 
+ 
+ #define FD_KEY(f,e) (((int64_t)(f) << (sizeof(int32_t) * 8)) | e)

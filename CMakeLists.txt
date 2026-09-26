@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(kvstore_engine VERSION 0.1.0 LANGUAGES CXX)
+project(kvstore_engine VERSION 0.1.0 LANGUAGES C CXX)
 
 include(FetchContent)
 include(CTest)
@@ -22,6 +22,9 @@ endfunction()
 option(KVSTORE_BUILD_TESTS "Build tests" ON)
 option(KVSTORE_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(KVSTORE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
+option(KVSTORE_ENABLE_NTYCO "Build the pinned third-party NtyCo runtime" ON)
+option(KVSTORE_ACCEPT_NTYCO_RESTRICTED_LICENSE
+       "Acknowledge NtyCo upstream has no permissive license" OFF)
 set(KVSTORE_SANITIZERS "" CACHE STRING "Comma-separated sanitizers: address,undefined,thread")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -74,6 +77,55 @@ FetchContent_Declare(picosha2 URL ${PICOSHA2_URLS}
 set(PICOSHA2_TEST OFF CACHE BOOL "" FORCE)
 set(PICOSHA2_EXAMPLE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(picosha2)
+
+if(KVSTORE_ENABLE_NTYCO AND UNIX)
+  if(NOT KVSTORE_ACCEPT_NTYCO_RESTRICTED_LICENSE)
+    message(FATAL_ERROR
+      "NtyCo has no upstream license file; set KVSTORE_ACCEPT_NTYCO_RESTRICTED_LICENSE=ON only for local evaluation")
+  endif()
+  FetchContent_Declare(ntyco
+    GIT_REPOSITORY https://github.com/wangbojing/NtyCo.git
+    GIT_TAG 72ab5fd04f0c228f464f160aaa521bb791b34aa
+    GIT_SHALLOW FALSE)
+  FetchContent_MakeAvailable(ntyco)
+  set(NTYCO_WAKEUP_MARKER "${ntyco_BINARY_DIR}/.kvstore_scheduler_cancel_v2_patched")
+  if(EXISTS "${NTYCO_WAKEUP_MARKER}")
+    file(READ "${ntyco_SOURCE_DIR}/core/nty_schedule.c" ntyco_scheduler_source)
+    string(FIND "${ntyco_scheduler_source}" "SYS_read" ntyco_wakeup_source_offset)
+    string(FIND "${ntyco_scheduler_source}" "sched->eventfd = -1" ntyco_eventfd_close_offset)
+    string(FIND "${ntyco_scheduler_source}" "eventlist[idx].data.fd == sched->eventfd" ntyco_eventfd_filter_offset)
+    string(FIND "${ntyco_scheduler_source}" "stop_requested" ntyco_cancel_source_offset)
+    string(FIND "${ntyco_scheduler_source}" "nty_schedule_cancel_all" ntyco_cancel_all_offset)
+    string(FIND "${ntyco_scheduler_source}" "EPOLL_CTL_DEL" ntyco_cancel_epoll_offset)
+    if(ntyco_wakeup_source_offset EQUAL -1 OR ntyco_eventfd_close_offset EQUAL -1 OR
+       ntyco_eventfd_filter_offset EQUAL -1 OR ntyco_cancel_source_offset EQUAL -1 OR
+       ntyco_cancel_all_offset EQUAL -1 OR ntyco_cancel_epoll_offset EQUAL -1)
+      file(REMOVE "${NTYCO_WAKEUP_MARKER}")
+    endif()
+  endif()
+  if(NOT EXISTS "${NTYCO_WAKEUP_MARKER}")
+    foreach(ntyco_patch IN ITEMS ntyco_scheduler_cancel.patch)
+      execute_process(
+        COMMAND patch -N -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/${ntyco_patch}"
+        WORKING_DIRECTORY "${ntyco_SOURCE_DIR}"
+        RESULT_VARIABLE ntyco_patch_result
+        OUTPUT_VARIABLE ntyco_patch_output
+        ERROR_VARIABLE ntyco_patch_error)
+      if(NOT ntyco_patch_result EQUAL 0)
+        message(FATAL_ERROR "failed to patch pinned NtyCo scheduler (${ntyco_patch}): ${ntyco_patch_output}${ntyco_patch_error}")
+      endif()
+    endforeach()
+    file(WRITE "${NTYCO_WAKEUP_MARKER}" "kvstore scheduler wakeup patch applied\n")
+  endif()
+  add_library(ntyco_runtime STATIC
+    ${ntyco_SOURCE_DIR}/core/nty_coroutine.c
+    ${ntyco_SOURCE_DIR}/core/nty_epoll.c
+    ${ntyco_SOURCE_DIR}/core/nty_schedule.c
+    ${ntyco_SOURCE_DIR}/core/nty_socket.c)
+  target_include_directories(ntyco_runtime PUBLIC ${ntyco_SOURCE_DIR}/core)
+  target_compile_options(ntyco_runtime PRIVATE -w)
+  target_link_libraries(ntyco_runtime PUBLIC pthread dl)
+endif()
 
 # Protobuf 3.21.12 (BSD-3-Clause): generated, interoperable sidecar messages.
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -160,15 +212,24 @@ add_library(kvstore_engine_lib
   src/protocol/native.cpp
   src/protocol/batch.cpp
   src/net/epoll_server.cpp
+  src/net/io_uring_server.cpp
+  src/net/ntyco_server.cpp
   src/replication/handshake.cpp
   src/replication/backlog.cpp
   src/replication/sync.cpp
   src/replication/frame.cpp
   src/replication/live_sync.cpp
   src/replication/executor.cpp
+  src/replication/io_uring_executor.cpp
 )
 target_include_directories(kvstore_engine_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(kvstore_engine_lib PUBLIC kvstore_common kvstore_options)
+if(TARGET ntyco_runtime)
+  target_sources(kvstore_engine_lib PRIVATE src/replication/ntyco_bridge.c)
+  target_include_directories(kvstore_engine_lib SYSTEM PRIVATE ${ntyco_SOURCE_DIR}/core)
+  target_compile_definitions(kvstore_engine_lib PRIVATE KVSTORE_HAVE_NTYCO=1)
+  target_link_libraries(kvstore_engine_lib PUBLIC ntyco_runtime)
+endif()
 
 if(KVSTORE_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")

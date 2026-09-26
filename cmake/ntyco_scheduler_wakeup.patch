@@ -1,0 +1,19 @@
+diff --git a/core/nty_schedule.c b/core/nty_schedule.c
+--- a/core/nty_schedule.c
++++ b/core/nty_schedule.c
+@@ -308,6 +308,14 @@ static int nty_schedule_epoll(nty_schedule *sched) {
+ 		break;
+ 	}
+ 
++	for (int idx = 0; idx < nready; ++idx) {
++		if (sched->eventlist[idx].data.fd == sched->eventfd) {
++			uint64_t value = 0;
++			(void)syscall(SYS_read, sched->eventfd, &value, sizeof(value));
++			__atomic_store_n(&sched->stop_requested, 1, __ATOMIC_RELEASE);
++			sched->eventlist[idx] = sched->eventlist[--nready];
++			--idx;
++		}
++	}
+ 	sched->nevents = 0;
+ 	sched->num_new_events = nready;
+ 

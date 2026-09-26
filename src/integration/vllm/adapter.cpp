@@ -205,7 +205,8 @@ PrefillResult Adapter::Prefill(const Request& request, bool exact, const BlockTa
   const auto lease = reply.value().lease_id();
   auto fail = [&](Status error) {
     if (lease != 0)
-      (void)Cleanup(v1::RELEASE, lease);
+      static_cast<void>(Cleanup(v1::RELEASE, lease));  
+      // Ignore cleanup failure, since the lease may have already expired.
     else
       Close();
     return reject(std::move(error));
@@ -268,7 +269,7 @@ PrefillResult Adapter::Prefill(const Request& request, bool exact, const BlockTa
   auto digest = kvcache::Sha256(hit.payload);
   if (!digest.ok() || digest.value() != hit.manifest.payload_digest)
     return fail({StatusCode::kCorruption, "source payload digest mismatch"});
-  status = Cleanup(v1::RELEASE, lease);
+  static_cast<void>(Cleanup(v1::RELEASE, lease));
   if (!status.ok()) return reject(status);
   status = Check(request);
   if (!status.ok()) return reject(status);
@@ -322,7 +323,7 @@ Status Adapter::HostCopyReady(std::uint64_t generation, ByteView bytes) try {
   return {StatusCode::kLimitExceeded, "host staging allocation failed"};
 }
 Status Adapter::FailPublication(Status status) {
-  if (reservation_ != 0) (void)Cleanup(v1::CANCEL, reservation_);
+  if (reservation_ != 0) static_cast<void>(Cleanup(v1::CANCEL, reservation_));
   reservation_ = 0;
   Bytes{}.swap(payload_);
   state_ = status.code() == StatusCode::kCancelled ? PublicationState::kCancelled

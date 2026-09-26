@@ -1,0 +1,100 @@
+diff --git a/core/nty_coroutine.h b/core/nty_coroutine.h
+index b73a08a..4d5a4bc 100755
+--- a/core/nty_coroutine.h
++++ b/core/nty_coroutine.h
+@@ -162,6 +162,7 @@ typedef struct _nty_schedule {
+ 	size_t stack_size;
+ 	int spawned_coroutines;
+ 	uint64_t default_timeout;
++	int stop_requested;
+ 	struct _nty_coroutine *curr_thread;
+ 	int page_size;
+ 
+@@ -291,8 +292,14 @@ void nty_schedule_cancel_event(nty_coroutine *co);
+ void nty_schedule_sched_event(nty_coroutine *co, int fd, nty_coroutine_event e, uint64_t timeout);
+ 
+ void nty_schedule_desched_sleepdown(nty_coroutine *co);
++void nty_schedule_wakeup(void);
++
+ void nty_schedule_sched_sleepdown(nty_coroutine *co, uint64_t msecs);
+ 
++void nty_schedule_request_stop(nty_schedule *sched);
++int nty_schedule_stop_requested(nty_schedule *sched);
++void nty_schedule_cancel_all(nty_schedule *sched);
++void nty_schedule_free(nty_schedule *sched);
+ nty_coroutine* nty_schedule_desched_wait(int fd);
+ void nty_schedule_sched_wait(nty_coroutine *co, int fd, unsigned short events, uint64_t timeout);
+ 
+diff --git a/core/nty_schedule.c b/core/nty_schedule.c
+index 9992f02..6b0a7e1 100644
+--- a/core/nty_schedule.c
++++ b/core/nty_schedule.c
+@@ -44,5 +44,6 @@
+ 
+ #include "nty_coroutine.h"
++#include <sys/syscall.h>
+ 
+ 
+ 
+@@ -128,1 +128,1 @@ nty_coroutine *nty_schedule_search_wait(int fd) {
+-	co->status = 0;
++	if (co != NULL) co->status = 0;
+@@ -140,8 +140,8 @@ nty_coroutine* nty_schedule_desched_wait(int fd) {
+ 	if (co != NULL) {
+ 		RB_REMOVE(_nty_coroutine_rbtree_wait, &co->sched->waiting, co);
++		co->status = 0;
++		nty_schedule_desched_sleepdown(co);
+ 	}
+-	co->status = 0;
+-	nty_schedule_desched_sleepdown(co);
+ 	
+ 	return co;
+ }
+@@ -183,0 +184,27 @@ void nty_schedule_cancel_wait(nty_coroutine *co) {
++void nty_schedule_request_stop(nty_schedule *sched) {
++	if (sched != NULL) __atomic_store_n(&sched->stop_requested, 1, __ATOMIC_RELEASE);
++}
++
++int nty_schedule_stop_requested(nty_schedule *sched) {
++	return sched != NULL && __atomic_load_n(&sched->stop_requested, __ATOMIC_ACQUIRE);
++}
++
++void nty_schedule_cancel_all(nty_schedule *sched) {
++	if (sched == NULL) return;
++	nty_coroutine *co = NULL;
++	while ((co = RB_MIN(_nty_coroutine_rbtree_wait, &sched->waiting)) != NULL) {
++		RB_REMOVE(_nty_coroutine_rbtree_wait, &sched->waiting, co);
++		struct epoll_event event = {0};
++		event.data.fd = co->fd;
++		epoll_ctl(sched->poller_fd, EPOLL_CTL_DEL, co->fd, &event);
++		if (co->status & BIT(NTY_COROUTINE_STATUS_SLEEPING))
++			RB_REMOVE(_nty_coroutine_rbtree_sleep, &sched->sleeping, co);
++		co->status = BIT(NTY_COROUTINE_STATUS_READY);
++		TAILQ_INSERT_TAIL(&sched->ready, co, ready_next);
++	}
++	while ((co = RB_MIN(_nty_coroutine_rbtree_sleep, &sched->sleeping)) != NULL) {
++		RB_REMOVE(_nty_coroutine_rbtree_sleep, &sched->sleeping, co);
++		co->status = BIT(NTY_COROUTINE_STATUS_READY);
++		TAILQ_INSERT_TAIL(&sched->ready, co, ready_next);
++	}
++}
+@@ -190,1 +190,1 @@ void nty_schedule_free(nty_schedule *sched) {
+-		close(sched->eventfd);
++		sched->eventfd = -1;
+@@ -310,0 +311,9 @@ static int nty_schedule_epoll(nty_schedule *sched) {
++	for (int idx = 0; idx < nready; ++idx) {
++		if (sched->eventlist[idx].data.fd == sched->eventfd) {
++			uint64_t value = 0;
++			(void)syscall(SYS_read, sched->eventfd, &value, sizeof(value));
++			nty_schedule_request_stop(sched);
++			sched->eventlist[idx] = sched->eventlist[--nready];
++			--idx;
++		}
++	}
+ 	sched->nevents = 0;
+ 	sched->num_new_events = nready;
+@@ -344,0 +345,2 @@ void nty_schedule_run(void) {
++		if (nty_schedule_stop_requested(sched)) nty_schedule_cancel_all(sched);
++		if (nty_schedule_stop_requested(sched)) sched->num_new_events = 0;
+@@ -365,1 +367,0 @@ void nty_schedule_run(void) {
+-	nty_schedule_free(sched);

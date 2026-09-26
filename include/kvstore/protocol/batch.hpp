@@ -24,6 +24,7 @@ class BatchParser {
   [[nodiscard]] Result<std::vector<Command>> ParseAvailable();
   [[nodiscard]] Result<std::vector<std::vector<Command>>> ParseAvailableFrames();
   [[nodiscard]] bool has_buffered_data() const noexcept { return !buffer_.empty(); }
+  [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffer_.size(); }
 
  private:
   std::string buffer_;

@@ -19,6 +19,7 @@ class NativeParser {
   [[nodiscard]] Status Feed(std::string_view bytes);
   [[nodiscard]] Result<std::vector<Command>> ParseAvailable();
   [[nodiscard]] bool has_buffered_data() const noexcept { return !buffer_.empty(); }
+  [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffer_.size(); }
 
  private:
   std::string buffer_;

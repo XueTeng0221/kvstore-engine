@@ -59,7 +59,7 @@ Result<v1::Response> HiCacheStorage::Publish(const kvcache::TensorManifest& m, s
     r.set_payload_checksum(kvstore::Crc32(chunks[i]));
     auto put = Call(r);
     if (!put.ok() || put.value().status() != v1::OK) {
-      const auto ignored = Abort(reserved.value().reservation_id()); (void)ignored;
+      static_cast<void>(Abort(reserved.value().reservation_id()));
       return put;
     }
   }

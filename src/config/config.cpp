@@ -96,6 +96,11 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
       config.server.output_high_watermark_bytes > config.server.max_output_buffer_bytes) {
     return Invalid("$.server", "buffer limits are invalid");
   }
+  constexpr std::size_t kMinimumResponseBytes = 128U;
+  if (config.network.backend == "ntyco" && config.server.max_inflight_requests >
+      config.server.max_output_buffer_bytes / kMinimumResponseBytes)
+    return Invalid("$.server.max_output_buffer_bytes",
+                   "must reserve a bounded response slot for every inflight request");
   if (config.server.max_input_buffer_bytes < config.protocol.max_frame_bytes)
     return Invalid("$.server.max_input_buffer_bytes", "must cover one protocol frame");
   if (config.protocol.enabled.empty()) return Invalid("$.protocol.enabled", "must not be empty");
@@ -147,8 +152,8 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
   if (!OneOf(config.network.backend, {"epoll", "io_uring", "ntyco"})) {
     return Invalid("$.network.backend", "unknown backend");
   }
-  if (config.network.backend != "epoll")
-    return Invalid("$.network.backend", "requested backend is not implemented");
+  if (config.network.io_uring_queue_depth == 0 || config.network.io_uring_queue_depth > 4096)
+    return Invalid("$.network.io_uring.queue_depth", "must be in [1, 4096]");
   if (config.network.epoll_max_events == 0 || config.network.io_uring_queue_depth == 0 ||
       config.network.ntyco_stack_bytes < 16384) {
     return Invalid("$.network", "backend limits are invalid");
@@ -220,7 +225,7 @@ Status Validate(const Config& config, const std::filesystem::path& base_director
       config.replication.heartbeat_interval_ms > kMaxMilliseconds / 3U) {
     return Invalid("$.replication", "handshake and heartbeat intervals must be positive");
   }
-  if (!OneOf(config.replication.backend, {"pthread", "reactor", "proactor", "ntyco"})) {
+  if (!OneOf(config.replication.backend, {"pthread", "reactor", "proactor", "io_uring", "ntyco"})) {
     return Invalid("$.replication.backend", "unknown backend");
   }
   if (config.kvcache.memory_budget_bytes == 0 || config.kvcache.disk_budget_bytes == 0 ||

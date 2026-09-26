@@ -85,8 +85,26 @@ class ProactorReplicationExecutor final : public IReplicationExecutor {
   bool stopping_{false};
 };
 
-// Project-owned cooperative single-worker ready queue, not an adapter to a
-// third-party ntyco ABI.
+class IoUringReplicationExecutor final : public IReplicationExecutor {
+ public:
+  explicit IoUringReplicationExecutor(std::size_t queue_capacity);
+  ~IoUringReplicationExecutor() override;
+  IoUringReplicationExecutor(const IoUringReplicationExecutor&) = delete;
+  IoUringReplicationExecutor& operator=(const IoUringReplicationExecutor&) = delete;
+
+  [[nodiscard]] Status Submit(std::function<void()> task) override;
+  [[nodiscard]] Status Execute(std::function<Status()> task) override;
+  void Shutdown() noexcept override;
+  [[nodiscard]] const Status& initialization_status() const noexcept { return status_; }
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  Status status_;
+};
+
+// Executes accepted work as real NtyCo coroutines. The dependency and its C
+// ABI are supplied by CMake; this is not a project-owned coroutine queue.
 class NtycoReplicationExecutor final : public IReplicationExecutor {
  public:
   explicit NtycoReplicationExecutor(std::size_t queue_capacity);
@@ -96,14 +114,8 @@ class NtycoReplicationExecutor final : public IReplicationExecutor {
   void Shutdown() noexcept override;
 
  private:
-  void Run() noexcept;
-  const std::size_t queue_capacity_;
-  std::mutex mutex_;
-  std::condition_variable ready_;
-  std::deque<std::function<void()>> tasks_;
-  std::size_t pending_{0};
-  bool stopping_{false};
-  std::thread worker_;
+  class Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 struct ReplicationExecutorOptions {

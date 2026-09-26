@@ -1,8 +1,27 @@
 #include "kvstore/replication/executor.hpp"
 
+#include <poll.h>
+
 #include <atomic>
+#include <cerrno>
 #include <future>
+#include <system_error>
 #include <utility>
+
+#ifdef __linux__
+#include <linux/io_uring.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+#ifdef KVSTORE_HAVE_NTYCO
+extern "C" {
+int kvstore_ntyco_spawn(void (*callback)(void*), void* argument);
+void kvstore_ntyco_run();
+void kvstore_ntyco_set_timeout(unsigned long usecs);
+}
+#endif
 
 namespace kvstore {
 namespace {
@@ -182,50 +201,98 @@ void ProactorReplicationExecutor::Shutdown() noexcept {
   drained_.wait(lock, [this] { return pending_ == 0; });
 }
 
+class NtycoReplicationExecutor::Impl {
+ public:
+  explicit Impl(std::size_t capacity) : capacity_(capacity), worker_([this] { Run(); }) {}
+  ~Impl() { Shutdown(); }
+  Status Submit(std::function<void()> task) {
+    if (!task) return InvalidTask();
+    std::scoped_lock lock(mutex_);
+    if (stopping_) return Stopped();
+    if (capacity_ == 0 || pending_ >= capacity_) return Full();
+    tasks_.push_back(std::move(task));
+    ++pending_;
+    ready_.notify_one();
+    return Status::Ok();
+  }
+  void Shutdown() noexcept {
+    {
+      std::scoped_lock lock(mutex_);
+      stopping_ = true;
+    }
+    ready_.notify_all();
+    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
+  }
+
+ private:
+#ifdef KVSTORE_HAVE_NTYCO
+  struct Context {
+    std::function<void()> task;
+    Impl* owner;
+  };
+  static void RunCoroutine(void* raw) {
+    auto* context = static_cast<Context*>(raw);
+    RunTask(context->task);
+    {
+      std::scoped_lock lock(context->owner->mutex_);
+      --context->owner->pending_;
+    }
+    delete context;
+  }
+#endif
+  void Run() noexcept {
+#ifdef KVSTORE_HAVE_NTYCO
+    for (;;) {
+      std::deque<std::function<void()>> batch;
+      {
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+        batch.swap(tasks_);
+      }
+      for (auto& task : batch) {
+        auto* context = new Context{std::move(task), this};
+        if (kvstore_ntyco_spawn(&RunCoroutine, context) != 0) {
+          RunTask(context->task);
+          delete context;
+          std::scoped_lock lock(mutex_);
+          --pending_;
+        }
+      }
+      kvstore_ntyco_set_timeout(1000);
+      kvstore_ntyco_run();
+      std::scoped_lock lock(mutex_);
+      if (stopping_ && pending_ == 0 && tasks_.empty()) return;
+    }
+#else
+    std::unique_lock lock(mutex_);
+    ready_.wait(lock, [this] { return stopping_; });
+#endif
+  }
+  const std::size_t capacity_;
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<std::function<void()>> tasks_;
+  std::size_t pending_{0};
+  bool stopping_{false};
+  std::thread worker_;
+};
+
 NtycoReplicationExecutor::NtycoReplicationExecutor(std::size_t capacity)
-    : queue_capacity_(capacity), worker_(&NtycoReplicationExecutor::Run, this) {}
+    : impl_(std::make_unique<Impl>(capacity)) {}
 NtycoReplicationExecutor::~NtycoReplicationExecutor() { Shutdown(); }
-
 Status NtycoReplicationExecutor::Submit(std::function<void()> task) {
-  if (!task) return InvalidTask();
-  std::scoped_lock lock(mutex_);
-  if (stopping_) return Stopped();
-  if (queue_capacity_ == 0 || pending_ >= queue_capacity_) return Full();
-  tasks_.push_back(std::move(task));
-  ++pending_;
-  ready_.notify_one();
-  return Status::Ok();
+#ifdef KVSTORE_HAVE_NTYCO
+  return impl_->Submit(std::move(task));
+#else
+  static_cast<void>(task);
+  return {StatusCode::kUnsupported, "NtyCo runtime is not built"};
+#endif
 }
-
 Status NtycoReplicationExecutor::Execute(std::function<Status()> task) {
   return ExecuteThrough(*this, std::move(task));
 }
-
 void NtycoReplicationExecutor::Shutdown() noexcept {
-  {
-    std::scoped_lock lock(mutex_);
-    stopping_ = true;
-  }
-  ready_.notify_all();
-  if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
-}
-
-void NtycoReplicationExecutor::Run() noexcept {
-  for (;;) {
-    std::function<void()> task;
-    {
-      std::unique_lock lock(mutex_);
-      ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-      if (tasks_.empty() && stopping_) return;
-      task = std::move(tasks_.front());
-      tasks_.pop_front();
-    }
-    RunTask(task);
-    {
-      std::scoped_lock lock(mutex_);
-      --pending_;
-    }
-  }
+  if (impl_) impl_->Shutdown();
 }
 
 Result<std::unique_ptr<IReplicationExecutor>> CreateReplicationExecutor(
@@ -245,9 +312,19 @@ Result<std::unique_ptr<IReplicationExecutor>> CreateReplicationExecutor(
     return std::unique_ptr<IReplicationExecutor>(std::make_unique<ProactorReplicationExecutor>(
         std::move(options.proactor_submit), options.queue_capacity));
   }
-  if (backend == "ntyco")
+  if (backend == "io_uring") {
+    auto executor = std::make_unique<IoUringReplicationExecutor>(options.queue_capacity);
+    if (!executor->initialization_status().ok()) return executor->initialization_status();
+    return std::unique_ptr<IReplicationExecutor>(std::move(executor));
+  }
+  if (backend == "ntyco") {
+#ifndef KVSTORE_HAVE_NTYCO
+    return Status{StatusCode::kUnsupported, "NtyCo runtime is not built"};
+#else
     return std::unique_ptr<IReplicationExecutor>(
         std::make_unique<NtycoReplicationExecutor>(options.queue_capacity));
+#endif
+  }
   return Status{StatusCode::kInvalidArgument, "unknown replication executor backend"};
 }
 

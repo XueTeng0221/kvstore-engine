@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -15,6 +16,8 @@
 #include "kvstore/command/dispatcher.hpp"
 #include "kvstore/engine/hash_engine.hpp"
 #include "kvstore/net/epoll_server.hpp"
+#include "kvstore/net/io_uring_server.hpp"
+#include "kvstore/net/ntyco_server.hpp"
 #include "kvstore/replication/backlog.hpp"
 #include "kvstore/replication/executor.hpp"
 
@@ -317,6 +320,273 @@ TEST_F(ServerFixture, ShutdownDoesNotDispatchNewWrites) {
   ::close(fd);
 }
 
+TEST(IoUringServerIntegrationTest, ServesRespAndStopsOrReportsUnsupported) {
+  const auto probe = IoUringServer::Probe(32, false);
+  if (!probe.ok()) {
+    if (probe.code() == StatusCode::kUnsupported)
+      GTEST_SKIP() << "io_uring unavailable: " << probe.message();
+    FAIL() << "io_uring probe failed unexpectedly: " << probe.message();
+  }
+  ServerConfig server_config{.listen_address = "127.0.0.1",
+                             .port = ReservePort(),
+                             .worker_threads = 1,
+                             .max_connections = 8,
+                             .max_inflight_requests = 8,
+                             .graceful_shutdown_ms = 500,
+                             .idle_timeout_ms = 1000,
+                             .handshake_timeout_ms = 500,
+                             .max_input_buffer_bytes = 4096,
+                             .max_output_buffer_bytes = 4096,
+                             .output_high_watermark_bytes = 2048};
+  ProtocolConfig protocol_config{.enabled = {"resp2", "text-kv", "batch-v1"},
+                                 .max_key_bytes = 128,
+                                 .max_value_bytes = 1024,
+                                 .max_frame_bytes = 4096,
+                                 .max_batch_records = 16,
+                                 .parse_timeout_ms = 500};
+  Dispatcher dispatcher(std::make_unique<HashEngine>(64));
+  IoUringServer server(server_config, protocol_config, dispatcher, "primary", {}, {}, nullptr, 1000,
+                       32, nullptr, false, 32, false, false);
+  Status run_status;
+  std::jthread thread([&] { run_status = server.Run(); });
+  for (int retry = 0; retry < 100 && !server.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(server.ready()) << run_status.message();
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(server_config.port);
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  const std::string ping = "*1\r\n$4\r\nPING\r\n";
+  ASSERT_EQ(::send(fd, ping.data(), ping.size(), MSG_NOSIGNAL), static_cast<ssize_t>(ping.size()));
+  char response[32]{};
+  const auto received = ::recv(fd, response, sizeof(response), 0);
+  ASSERT_GT(received, 0);
+  EXPECT_NE(std::string_view(response, static_cast<std::size_t>(received)).find("+PONG\r\n"),
+            std::string_view::npos);
+  ::close(fd);
+  server.Stop();
+  thread.join();
+  EXPECT_TRUE(run_status.ok()) << run_status.message();
+}
+
+TEST(NtycoServerIntegrationTest, ServesRespAndStopsOrReportsUnsupported) {
+  ServerConfig server_config{.listen_address = "127.0.0.1",
+                             .port = ReservePort(),
+                             .worker_threads = 1,
+                             .max_connections = 8,
+                             .max_inflight_requests = 8,
+                             .graceful_shutdown_ms = 500,
+                             .idle_timeout_ms = 1000,
+                             .handshake_timeout_ms = 500,
+                             .max_input_buffer_bytes = 4096,
+                             .max_output_buffer_bytes = 4096,
+                             .output_high_watermark_bytes = 2048};
+  ProtocolConfig protocol_config{.enabled = {"resp2", "text-kv", "batch-v1"},
+                                 .max_key_bytes = 128,
+                                 .max_value_bytes = 1024,
+                                 .max_frame_bytes = 4096,
+                                 .max_batch_records = 16,
+                                 .parse_timeout_ms = 500};
+  Dispatcher dispatcher(std::make_unique<HashEngine>(64));
+  NtycoServer server(server_config, protocol_config, dispatcher, 32U * 1024U);
+  Status run_status;
+  std::jthread thread([&] { run_status = server.Run(); });
+  for (int retry = 0; retry < 100 && !server.ready() && server.state() != ServerState::kFailed;
+       ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!server.ready()) {
+    server.Stop();
+    thread.join();
+    if (run_status.code() == StatusCode::kUnsupported) GTEST_SKIP() << run_status.message();
+    FAIL() << run_status.message();
+  }
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(server_config.port);
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  const std::string ping = "*1\r\n$4\r\nPING\r\n";
+  ASSERT_EQ(::send(fd, ping.data(), ping.size(), MSG_NOSIGNAL), static_cast<ssize_t>(ping.size()));
+  char response[32]{};
+  const auto received = ::recv(fd, response, sizeof(response), 0);
+  ASSERT_GT(received, 0);
+  EXPECT_NE(std::string_view(response, static_cast<std::size_t>(received)).find("+PONG\r\n"),
+            std::string_view::npos);
+  ::close(fd);
+  const int fragmented_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(fragmented_fd, 0);
+  ASSERT_EQ(::connect(fragmented_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(::send(fragmented_fd, ping.data(), 1, MSG_NOSIGNAL), 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  ASSERT_EQ(::send(fragmented_fd, ping.data() + 1, ping.size() - 1, MSG_NOSIGNAL),
+            static_cast<ssize_t>(ping.size() - 1));
+  std::memset(response, 0, sizeof(response));
+  const auto fragmented_received = ::recv(fragmented_fd, response, sizeof(response), 0);
+  ASSERT_GT(fragmented_received, 0);
+   EXPECT_NE(std::string_view(response, static_cast<std::size_t>(fragmented_received)).find("+PONG\r\n"),
+             std::string_view::npos);
+   ::close(fragmented_fd);
+  const int hup_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(hup_fd, 0);
+  ASSERT_EQ(::connect(hup_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ::close(hup_fd);
+  const int slow_reader_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(slow_reader_fd, 0);
+  ASSERT_EQ(::connect(slow_reader_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  std::string pipelined;
+  for (int index = 0; index < 64; ++index) pipelined += ping;
+  ASSERT_EQ(::send(slow_reader_fd, pipelined.data(), pipelined.size(), MSG_NOSIGNAL),
+            static_cast<ssize_t>(pipelined.size()));
+  const int idle_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(idle_fd, 0);
+  ASSERT_EQ(::connect(idle_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  const std::string partial = "*";
+  ASSERT_EQ(::send(idle_fd, partial.data(), partial.size(), MSG_NOSIGNAL),
+            static_cast<ssize_t>(partial.size()));
+  const auto stop_started = std::chrono::steady_clock::now();
+  server.Stop();
+  thread.join();
+  const auto stop_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - stop_started);
+  EXPECT_LT(stop_elapsed.count(), static_cast<std::int64_t>(server_config.graceful_shutdown_ms));
+   EXPECT_TRUE(run_status.ok()) << run_status.message();
+   ::close(idle_fd);
+  ::close(slow_reader_fd);
+}
+
+TEST(IoUringServerIntegrationTest, ServesNativeBatchAndFragmentedResp) {
+  const auto probe = IoUringServer::Probe(32, false);
+  if (!probe.ok()) {
+    if (probe.code() == StatusCode::kUnsupported)
+      GTEST_SKIP() << "io_uring unavailable: " << probe.message();
+    FAIL() << "io_uring probe failed unexpectedly: " << probe.message();
+  }
+  ServerConfig server_config{.listen_address = "127.0.0.1",
+                             .port = ReservePort(),
+                             .worker_threads = 1,
+                             .max_connections = 8,
+                             .max_inflight_requests = 8,
+                             .graceful_shutdown_ms = 500,
+                             .idle_timeout_ms = 1000,
+                             .handshake_timeout_ms = 500,
+                             .max_input_buffer_bytes = 4096,
+                             .max_output_buffer_bytes = 4096,
+                             .output_high_watermark_bytes = 2048};
+  ProtocolConfig protocol_config{.enabled = {"resp2", "text-kv", "batch-v1"},
+                                 .max_key_bytes = 128,
+                                 .max_value_bytes = 1024,
+                                 .max_frame_bytes = 4096,
+                                 .max_batch_records = 16,
+                                 .parse_timeout_ms = 500};
+  Dispatcher dispatcher(std::make_unique<HashEngine>(64));
+  IoUringServer server(server_config, protocol_config, dispatcher);
+  Status run_status;
+  std::jthread thread([&] { run_status = server.Run(); });
+  for (int retry = 0; retry < 100 && !server.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(server.ready()) << run_status.message();
+  const auto connect = [&] {
+    const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    EXPECT_GE(fd, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(server_config.port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    EXPECT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    return fd;
+  };
+  const auto receive = [](int fd) {
+    char response[4096]{};
+    const auto count = ::recv(fd, response, sizeof(response), 0);
+    return count > 0 ? std::string(response, static_cast<std::size_t>(count)) : std::string{};
+  };
+  int fd = connect();
+  const std::string first = "*1\r\n$4\r\nPING\r\n";
+  ASSERT_EQ(::send(fd, first.data(), 5, MSG_NOSIGNAL), 5);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ASSERT_EQ(::send(fd, first.data() + 5, first.size() - 5, MSG_NOSIGNAL),
+            static_cast<ssize_t>(first.size() - 5));
+  EXPECT_NE(receive(fd).find("+PONG\r\n"), std::string::npos);
+  ::close(fd);
+
+  fd = connect();
+  const std::string native = "KV/1 SET 3 3\r\nkeyvalue";
+  ASSERT_EQ(::send(fd, native.data(), native.size(), MSG_NOSIGNAL),
+            static_cast<ssize_t>(native.size()));
+  const auto native_response = receive(fd);
+  EXPECT_NE(native_response.find("KV/1 OK"), std::string::npos);
+  ::close(fd);
+
+  fd = connect();
+  const auto batch = BatchFrame(CommandType::kSet, "bkey", "bval");
+  ASSERT_EQ(::send(fd, batch.data(), batch.size(), MSG_NOSIGNAL),
+            static_cast<ssize_t>(batch.size()));
+  const auto batch_response = receive(fd);
+  ASSERT_GE(batch_response.size(), 20U);
+  EXPECT_EQ(batch_response.substr(0, 4), "KVB1");
+  EXPECT_EQ(static_cast<unsigned char>(batch_response[4]), 0U);
+  EXPECT_EQ(static_cast<unsigned char>(batch_response[5]), 1U);
+  EXPECT_EQ(static_cast<unsigned char>(batch_response[8]), 0U);
+  EXPECT_EQ(static_cast<unsigned char>(batch_response[11]), 1U);
+  ::close(fd);
+
+  server.Stop();
+  thread.join();
+  EXPECT_TRUE(run_status.ok()) << run_status.message();
+}
+
+TEST(IoUringServerIntegrationTest, StopsWithPendingPartialRequest) {
+  const auto probe = IoUringServer::Probe(32, false);
+  if (!probe.ok()) {
+    if (probe.code() == StatusCode::kUnsupported)
+      GTEST_SKIP() << "io_uring unavailable: " << probe.message();
+    FAIL() << "io_uring probe failed unexpectedly: " << probe.message();
+  }
+  ServerConfig server_config{.listen_address = "127.0.0.1",
+                             .port = ReservePort(),
+                             .worker_threads = 1,
+                             .max_connections = 2,
+                             .max_inflight_requests = 2,
+                             .graceful_shutdown_ms = 500,
+                             .idle_timeout_ms = 1000,
+                             .handshake_timeout_ms = 500,
+                             .max_input_buffer_bytes = 256,
+                             .max_output_buffer_bytes = 512,
+                             .output_high_watermark_bytes = 256};
+  ProtocolConfig protocol_config{.enabled = {"resp2"},
+                                 .max_key_bytes = 64,
+                                 .max_value_bytes = 128,
+                                 .max_frame_bytes = 256,
+                                 .max_batch_records = 4,
+                                 .parse_timeout_ms = 1000};
+  Dispatcher dispatcher(std::make_unique<HashEngine>(16));
+  IoUringServer server(server_config, protocol_config, dispatcher);
+  Status run_status;
+  std::jthread thread([&] { run_status = server.Run(); });
+  for (int retry = 0; retry < 100 && !server.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(server.ready()) << run_status.message();
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(server_config.port);
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  const std::string partial = "*1\r\n$4\r\nPING";
+  ASSERT_EQ(::send(fd, partial.data(), partial.size(), MSG_NOSIGNAL),
+            static_cast<ssize_t>(partial.size()));
+  server.Stop();
+  thread.join();
+  ::close(fd);
+  EXPECT_TRUE(run_status.ok()) << run_status.message();
+}
+
 TEST(ReplicationSocketIntegrationTest, PrimaryReplicaConvergeAndReconnect) {
   const auto primary_port = ReservePort();
   const auto replica_port = ReservePort();
@@ -468,8 +738,8 @@ TEST(ReplicationSocketIntegrationTest, BidirectionalCycleDoesNotAmplifyOriginEve
   const auto a_port = ReservePort();
   const auto b_port = ReservePort();
   const auto make_config = [](std::uint16_t port) {
-    return ServerConfig{"127.0.0.1", port, 1, 16, 8, 1000, 3000, 500,
-                        1U << 20U, 1U << 20U, 1U << 19U};
+    return ServerConfig{"127.0.0.1", port, 1,         16,        8,        1000,
+                        3000,        500,  1U << 20U, 1U << 20U, 1U << 19U};
   };
   const ProtocolConfig protocol{{"resp2"}, 128, 1024, 1U << 20U, 16, 500};
   ReplicationBacklog a_backlog;
@@ -484,8 +754,7 @@ TEST(ReplicationSocketIntegrationTest, BidirectionalCycleDoesNotAmplifyOriginEve
       "node-b");
   b_dispatcher.SetReadOnly(true);
   ASSERT_TRUE(
-      a_dispatcher.Execute({CommandType::kSet, {"seed", "ready"}, WriteSource::kClient, true})
-          .ok);
+      a_dispatcher.Execute({CommandType::kSet, {"seed", "ready"}, WriteSource::kClient, true}).ok);
   auto a_config = make_config(a_port);
   auto b_config = make_config(b_port);
   EpollServer a(a_config, protocol, a_dispatcher, "primary", "node-a",
@@ -521,8 +790,7 @@ TEST(ReplicationSocketIntegrationTest, BidirectionalCycleDoesNotAmplifyOriginEve
     ADD_FAILURE() << "initial snapshot did not converge";
     return;
   }
-  if (!a_dispatcher
-           .Execute({CommandType::kSet, {"cycle", "value"}, WriteSource::kClient, true})
+  if (!a_dispatcher.Execute({CommandType::kSet, {"cycle", "value"}, WriteSource::kClient, true})
            .ok) {
     a.Stop();
     b.Stop();

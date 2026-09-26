@@ -1,4 +1,6 @@
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -11,9 +13,13 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "kvstore/command/dispatcher.hpp"
 #include "kvstore/engine/array_engine.hpp"
+#include "kvstore/engine/hash_engine.hpp"
+#include "kvstore/net/epoll_server.hpp"
 #include "kvstore/replication/backlog.hpp"
 #include "kvstore/replication/executor.hpp"
 #include "kvstore/replication/frame.hpp"
@@ -34,6 +40,36 @@ WriteEvent IncrementalEvent(std::uint64_t offset, std::string key, std::string v
   event.source = WriteSource::kIncrementalSync;
   event.checksum = event.ComputeChecksum();
   return event;
+}
+
+std::uint16_t ReserveReplicationPort() {
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return 0;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+    ::close(fd);
+    return 0;
+  }
+  socklen_t length = sizeof(address);
+  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) < 0) {
+    ::close(fd);
+    return 0;
+  }
+  ::close(fd);
+  return ntohs(address.sin_port);
+}
+
+bool WaitForValue(Dispatcher& dispatcher, std::string_view key, std::string_view expected,
+                  int attempts = 300) {
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    const auto value = dispatcher.engine().Get(key, {});
+    if (value.ok() && value.value() == expected) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
 }
 
 TEST(ReplicationHandshakeTest, SupportsPartialFrameAndRejectsVersion) {
@@ -277,6 +313,107 @@ TEST(ReplicationSyncTest, SnapshotViewRejectsOversizedDataBeforeExport) {
   EXPECT_EQ(accepted.value().entries.front().value.size(), 4096U);
 }
 
+TEST(ReplicationIoUringSocketTest, DrivesFullIncrementalAndReconnectConvergence) {
+  ReplicationExecutorOptions executor_options;
+  executor_options.queue_capacity = 8;
+  auto executor_result = CreateReplicationExecutor("io_uring", std::move(executor_options));
+  if (!executor_result.ok() && executor_result.status().code() == StatusCode::kUnsupported)
+    GTEST_SKIP() << "io_uring unavailable: " << executor_result.status().message();
+  ASSERT_TRUE(executor_result.ok()) << executor_result.status().message();
+  auto executor = std::move(executor_result).value();
+
+  const auto primary_port = ReserveReplicationPort();
+  const auto replica_port = ReserveReplicationPort();
+  ASSERT_NE(primary_port, 0U);
+  ASSERT_NE(replica_port, 0U);
+  const ServerConfig server_config{"127.0.0.1", primary_port, 1, 16, 8, 1000, 3000, 500,
+                                   1U << 20U, 1U << 20U, 1U << 19U};
+  const ServerConfig replica_config{"127.0.0.1", replica_port, 1, 16, 8, 1000, 3000, 500,
+                                   1U << 20U, 1U << 20U, 1U << 19U};
+  const ProtocolConfig protocol{{"resp2"}, 128, 1024, 1U << 20U, 16, 500};
+  ReplicationBacklog backlog;
+  Dispatcher primary_dispatcher(
+      std::make_unique<HashEngine>(64),
+      [&backlog](const WriteEvent& event) { return backlog.Append({event}); }, {}, {}, 1, 1,
+      "io-uring-primary");
+  Dispatcher replica_dispatcher(std::make_unique<HashEngine>(64));
+  replica_dispatcher.SetReadOnly(true);
+  ASSERT_TRUE(primary_dispatcher
+                  .Execute({CommandType::kSet, {"snapshot", "ready"}, WriteSource::kClient,
+                            true})
+                  .ok);
+
+  EpollServer primary(server_config, protocol, primary_dispatcher, "primary", "io-uring-primary",
+                      {}, &backlog, 100, 128);
+  EpollServer replica(replica_config, protocol, replica_dispatcher, "replica", "io-uring-replica",
+                      "127.0.0.1:" + std::to_string(primary_port), nullptr, 100, 128,
+                      executor.get());
+  Status primary_status;
+  Status replica_status;
+  std::jthread primary_thread([&] { primary_status = primary.Run(); });
+  for (int retry = 0; retry < 100 && !primary.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!primary.ready()) {
+    primary.Stop();
+    primary_thread.join();
+    ADD_FAILURE() << "io_uring replication primary did not become ready";
+    executor->Shutdown();
+    return;
+  }
+  std::jthread replica_thread([&] { replica_status = replica.Run(); });
+  for (int retry = 0; retry < 100 && !replica.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!replica.ready()) {
+    replica.Stop();
+    primary.Stop();
+    replica_thread.join();
+    primary_thread.join();
+    ADD_FAILURE() << "io_uring replication replica did not become ready";
+    executor->Shutdown();
+    return;
+  }
+
+  EXPECT_TRUE(WaitForValue(replica_dispatcher, "snapshot", "ready"));
+  EXPECT_TRUE(primary_dispatcher
+                  .Execute({CommandType::kSet, {"incremental", "applied"},
+                            WriteSource::kClient, true})
+                  .ok);
+  EXPECT_TRUE(WaitForValue(replica_dispatcher, "incremental", "applied"));
+
+  primary.Stop();
+  primary_thread.join();
+  ASSERT_TRUE(primary_status.ok()) << primary_status.message();
+  ASSERT_TRUE(primary_dispatcher
+                  .Execute({CommandType::kSet, {"reconnect", "applied"}, WriteSource::kClient,
+                            true})
+                  .ok);
+
+  EpollServer restarted_primary(server_config, protocol, primary_dispatcher, "primary",
+                                "io-uring-primary", {}, &backlog, 100, 128);
+  Status restarted_status;
+  std::jthread restarted_thread([&] { restarted_status = restarted_primary.Run(); });
+  for (int retry = 0; retry < 100 && !restarted_primary.ready(); ++retry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (!restarted_primary.ready()) {
+    restarted_primary.Stop();
+    replica.Stop();
+    restarted_thread.join();
+    replica_thread.join();
+    ADD_FAILURE() << "io_uring replication primary did not restart";
+    executor->Shutdown();
+    return;
+  }
+  EXPECT_TRUE(WaitForValue(replica_dispatcher, "reconnect", "applied"));
+
+  replica.Stop();
+  replica_thread.join();
+  restarted_primary.Stop();
+  restarted_thread.join();
+  executor->Shutdown();
+  EXPECT_TRUE(replica_status.ok()) << replica_status.message();
+  EXPECT_TRUE(restarted_status.ok()) << restarted_status.message();
+}
+
 TEST(LiveSyncDeduplicatorTest, ForwardsMultiHopEventsOnceAndExpiresBoundedEntries) {
   using Clock = LiveSyncDeduplicator::Clock;
   const auto start = Clock::time_point{};
@@ -488,6 +625,20 @@ TEST(ReplicationExecutorFactoryTest, RejectsUnknownBackendAndMissingAdapters) {
   EXPECT_FALSE(CreateReplicationExecutor("unknown").ok());
   EXPECT_FALSE(CreateReplicationExecutor("reactor").ok());
   EXPECT_FALSE(CreateReplicationExecutor("proactor").ok());
+}
+
+TEST(ReplicationExecutorIoUringTest, RunsCompletionAndDrainsOnShutdown) {
+  ReplicationExecutorOptions options;
+  options.queue_capacity = 4;
+  auto result = CreateReplicationExecutor("io_uring", std::move(options));
+  if (!result.ok() && result.status().code() == StatusCode::kUnsupported) GTEST_SKIP();
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  auto executor = std::move(result).value();
+  std::promise<void> completed;
+  auto future = completed.get_future();
+  ASSERT_TRUE(executor->Submit([&completed] { completed.set_value(); }).ok());
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  executor->Shutdown();
 }
 
 }  // namespace

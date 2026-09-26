@@ -13,6 +13,10 @@ Environment used for the current result:
 - Debug build, C++20, `-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror`
 - Command: `./build/replication_executor_benchmark benchmarks/p5-current.txt`
 
-The `proactor` and `ntyco` rows currently measure the configured project adapters. They are not
-evidence of a real io_uring or third-party NtyCo runtime; those integrations remain explicitly
-unsupported until their dependencies and ownership contracts are implemented.
+The `io_uring` row is created by the raw Linux io_uring SQE/CQE executor, using a real eventfd
+read operation per accepted task. If the host rejects `io_uring_setup`, the raw file records
+`status=unavailable` and no throughput is reported. The `ntyco` row runs the pinned third-party
+NtyCo C runtime through its coroutine ABI; it is not the old project-owned worker adapter.
+Results from unavailable backends must not be compared as zero-throughput measurements.
+
+Current raw result: `benchmarks/p5-current.txt`. The current host accepted both real backends.

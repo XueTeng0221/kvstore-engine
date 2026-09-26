@@ -1,15 +1,20 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <thread>
 
 #include "kvstore/command/dispatcher.hpp"
 #include "kvstore/config/config.hpp"
 #include "kvstore/engine/engine_factory.hpp"
 #include "kvstore/net/epoll_server.hpp"
+#include "kvstore/net/io_uring_server.hpp"
+#include "kvstore/net/ntyco_server.hpp"
+#include "kvstore/net/network_backend.hpp"
 #include "kvstore/persistence/aof.hpp"
 #include "kvstore/persistence/snapshot.hpp"
 #include "kvstore/persistence/write_event_queue.hpp"
@@ -23,10 +28,8 @@ void PrintUsage(std::ostream& output) {
   output << "Usage: kvstore_server [--config PATH] [--help] [--version] [--check-config]\n";
 }
 
-kvstore::EpollServer* g_server = nullptr;
-void StopServer(int) {
-  if (g_server != nullptr) g_server->Stop();
-}
+std::atomic_flag g_stop_requested = ATOMIC_FLAG_INIT;
+void StopServer(int) { g_stop_requested.test_and_set(std::memory_order_relaxed); }
 
 }  // namespace
 
@@ -203,15 +206,33 @@ int main(int argc, char** argv) {
               << replication_executor.status().message() << '\n';
     return 1;
   }
-  kvstore::EpollServer server(
-      config.value().server, config.value().protocol, dispatcher, config.value().replication.role,
-      config.value().replication.node_id, config.value().replication.upstream.value_or(""),
-      &replication_backlog, config.value().replication.heartbeat_interval_ms,
-      config.value().network.epoll_max_events, replication_executor.value().get());
-  g_server = &server;
+  std::unique_ptr<kvstore::INetworkBackend> server;
+  if (config.value().network.backend == "io_uring") {
+    server = std::make_unique<kvstore::IoUringServer>(
+        config.value().server, config.value().protocol, dispatcher, config.value().replication.role,
+        config.value().replication.node_id, config.value().replication.upstream.value_or(""),
+        &replication_backlog, config.value().replication.heartbeat_interval_ms,
+        config.value().network.epoll_max_events, replication_executor.value().get(), false,
+        config.value().network.io_uring_queue_depth, config.value().network.io_uring_sqpoll,
+        config.value().network.allow_fallback);
+  } else if (config.value().network.backend == "ntyco") {
+    server = std::make_unique<kvstore::NtycoServer>(
+        config.value().server, config.value().protocol, dispatcher,
+        config.value().network.ntyco_stack_bytes);
+  } else {
+    server = std::make_unique<kvstore::EpollServer>(
+        config.value().server, config.value().protocol, dispatcher, config.value().replication.role,
+        config.value().replication.node_id, config.value().replication.upstream.value_or(""),
+        &replication_backlog, config.value().replication.heartbeat_interval_ms,
+        config.value().network.epoll_max_events, replication_executor.value().get());
+  }
   std::signal(SIGINT, StopServer);
   std::signal(SIGTERM, StopServer);
-  const auto status = server.Run();
-  g_server = nullptr;
+  std::jthread signal_watcher([backend = server.get()](std::stop_token stop) {
+    while (!stop.stop_requested() && !g_stop_requested.test(std::memory_order_relaxed))
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (g_stop_requested.test(std::memory_order_relaxed)) backend->Stop();
+  });
+  const auto status = server->Run();
   return status.ok() ? 0 : 1;
 }

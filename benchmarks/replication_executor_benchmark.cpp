@@ -87,26 +87,41 @@ int Run(std::string_view backend, std::size_t operations, int round) {
     });
   };
   auto executor = kvstore::CreateReplicationExecutor(backend, std::move(options));
-  if (!executor.ok()) return 1;
+  if (!executor.ok()) {
+    std::ostringstream unavailable;
+    unavailable << "round=" << round << " backend=" << backend
+                << " status=unavailable reason=" << executor.status().message() << '\n';
+    std::cout << unavailable.str();
+    if (raw_output != nullptr) *raw_output << unavailable.str();
+    return executor.status().code() == kvstore::StatusCode::kUnsupported ? 0 : 1;
+  }
 
   std::atomic<std::size_t> completed{0};
   const auto warmup_operations = operations / 10U;
   std::atomic<std::size_t> warmup_completed{0};
   for (std::size_t index = 0; index < warmup_operations; ++index) {
-    if (!executor.value()->Submit([&warmup_completed] { warmup_completed.fetch_add(1U); }).ok())
-      return 1;
+    for (;;) {
+      const auto status = executor.value()->Submit([&warmup_completed] { warmup_completed.fetch_add(1U); });
+      if (status.ok()) break;
+      if (status.code() != kvstore::StatusCode::kBusy) return 1;
+      std::this_thread::yield();
+    }
   }
   while (warmup_completed.load() != warmup_operations) std::this_thread::yield();
   std::vector<double> latency_us(operations, 0.0);
   const auto started = Clock::now();
   for (std::size_t index = 0; index < operations; ++index) {
     const auto task_started = Clock::now();
-    const auto status = executor.value()->Submit([&completed, &latency_us, index, task_started] {
-      latency_us[index] =
-          std::chrono::duration<double, std::micro>(Clock::now() - task_started).count();
-      completed.fetch_add(1U);
-    });
-    if (!status.ok()) return 1;
+    for (;;) {
+      const auto status = executor.value()->Submit([&completed, &latency_us, index, task_started] {
+        latency_us[index] =
+            std::chrono::duration<double, std::micro>(Clock::now() - task_started).count();
+        completed.fetch_add(1U);
+      });
+      if (status.ok()) break;
+      if (status.code() != kvstore::StatusCode::kBusy) return 1;
+      std::this_thread::yield();
+    }
   }
   executor.value()->Shutdown();
   pump.Stop();
@@ -138,7 +153,7 @@ int main(int argc, char** argv) {
     raw_output = &output;
   }
   for (int round = 1; round <= 10; ++round) {
-    for (const std::string_view backend : {"pthread", "reactor", "proactor", "ntyco"}) {
+    for (const std::string_view backend : {"pthread", "reactor", "io_uring", "ntyco"}) {
       if (Run(backend, kOperations, round) != 0) return 1;
     }
   }

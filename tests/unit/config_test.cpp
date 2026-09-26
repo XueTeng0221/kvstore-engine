@@ -84,7 +84,7 @@ TEST(ConfigTest, BoundsReplicationHeartbeatIntervalBeforeDurationConversion) {
 
 TEST(ConfigTest, AcceptsImplementedReplicationExecutorsAndRejectsUnknown) {
   auto json = DefaultJson();
-  for (const auto* backend : {"pthread", "reactor", "proactor", "ntyco"}) {
+  for (const auto* backend : {"pthread", "reactor", "proactor", "io_uring", "ntyco"}) {
     json["replication"]["backend"] = backend;
     const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
     EXPECT_TRUE(result.ok()) << backend;
@@ -93,6 +93,28 @@ TEST(ConfigTest, AcceptsImplementedReplicationExecutorsAndRejectsUnknown) {
   const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
   ASSERT_FALSE(result.ok());
   EXPECT_NE(result.status().message().find("$.replication.backend"), std::string_view::npos);
+}
+
+TEST(ConfigTest, AcceptsNtycoNetworkBackend) {
+  auto json = DefaultJson();
+  json["network"]["backend"] = "ntyco";
+  const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_EQ(result.value().network.backend, "ntyco");
+}
+
+TEST(ConfigTest, AcceptsIoUringNetworkSelection) {
+  auto json = DefaultJson();
+  json["network"]["backend"] = "io_uring";
+  const auto result = Config::Parse(json.dump(), DefaultConfigPath().parent_path());
+  ASSERT_TRUE(result.ok()) << result.status().message();
+  EXPECT_EQ(result.value().network.backend, "io_uring");
+}
+
+TEST(ConfigTest, RejectsIoUringQueueDepthAboveRuntimeLimit) {
+  auto json = DefaultJson();
+  json["network"]["io_uring"]["queue_depth"] = 4097;
+  EXPECT_FALSE(Config::Parse(json.dump(), DefaultConfigPath().parent_path()).ok());
 }
 
 TEST(ConfigTest, RejectsOutputBufferTooSmallForReplicationFrameReserve) {
