@@ -50,6 +50,7 @@ class _Load:
     block_ids: tuple[int, ...]
     generation: int
     token_ids: tuple[int, ...] = ()
+    skip_save: bool = False
 
 
 @dataclass
@@ -83,6 +84,7 @@ class KVStoreConnector(KVConnectorBase_V1):
             "kvstore_vllm_active_request", default=None
         )
         self._saving: set[str] = set()
+        self._external_full_hits: set[str] = set()
         self._finished: set[str] = set()
         self._kv_caches: dict[str, Any] = {}
         self._load_plans: dict[str, _Load] = {}
@@ -160,11 +162,15 @@ class KVStoreConnector(KVConnectorBase_V1):
                        shape[2] == block_tokens and
                        (not num_heads or shape[3] == num_heads) and
                        (not head_size or shape[4] == head_size))
-        kv_first = (len(shape) == 4 and shape[0] == 2 and
+        block_first_flat = (len(shape) == 4 and shape[1] == 2 and shape[0] != 2 and
+                            shape[2] == block_tokens and
+                            (not num_heads or not head_size or
+                             shape[3] == num_heads * head_size))
+        kv_first = (len(shape) == 4 and shape[0] == 2 and shape[1] != 2 and
                     shape[2] == block_tokens and
                     (not num_heads or not head_size or
                      shape[3] == num_heads * head_size))
-        if not block_first and not kv_first:
+        if not block_first and not block_first_flat and not kv_first:
             raise ValueError(
                 f"unsupported KV cache layout for {layer_name}: shape={shape}")
 
@@ -177,7 +183,13 @@ class KVStoreConnector(KVConnectorBase_V1):
         head_size = int(getattr(geometry, "head_size", 0))
         if tensor.ndim == 5:
             selected = tensor.index_select(0, ids).permute(1, 0, 2, 3, 4)
-        else:
+        elif tensor.shape[1] == 2 and tensor.shape[0] != 2:
+            selected = tensor.index_select(0, ids).permute(1, 0, 2, 3)
+            if not num_heads or not head_size:
+                raise ValueError("flattened KV cache layout requires runtime head geometry")
+            selected = selected.reshape(
+                2, ids.numel(), tensor.shape[2], num_heads, head_size)
+        elif tensor.shape[0] == 2 and tensor.shape[1] != 2:
             selected = tensor.index_select(1, ids)
             if not num_heads or not head_size:
                 raise ValueError("flattened KV cache layout requires runtime head geometry")
@@ -193,8 +205,12 @@ class KVStoreConnector(KVConnectorBase_V1):
                            non_blocking=True)
         if destination.ndim == 5:
             destination.index_copy_(0, ids, source.permute(1, 0, 2, 3, 4))
-        else:
+        elif destination.shape[1] == 2:
+            destination.index_copy_(0, ids, source.flatten(3).permute(1, 0, 2, 3))
+        elif destination.shape[0] == 2 and destination.shape[1] != 2:
             destination.index_copy_(1, ids, source.flatten(3))
+        else:
+            raise ValueError("ambiguous KV cache layout with two blocks")
 
     def bind_gpu_block_pool(self, gpu_block_pool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -236,7 +252,14 @@ class KVStoreConnector(KVConnectorBase_V1):
             self._load_plans[request_id] = _Load(
                 request_id, matched, (), generation, tokens[:matched]
             )
-        return max(0, matched - num_computed_tokens), False
+        if matched == len(tokens) and matched > 0:
+            with self._lock:
+                self._external_full_hits.add(request_id)
+        available = max(0, matched - num_computed_tokens)
+        # The bridge owns a bounded synchronous UDS fetch and records the
+        # CUDA event before forward starts; advertising an async load lets
+        # vLLM launch forward before the event is attached to the request.
+        return available, False
 
     def on_new_request(self, request) -> None:
         request_id = str(request.request_id)
@@ -265,6 +288,8 @@ class KVStoreConnector(KVConnectorBase_V1):
                 self._load[saves[0].request_id] = _Save(
                     self._pending[saves[0].request_id], {}, saves[0].generation
                 )
+                if saves[0].skip_save:
+                    self._external_full_hits.add(saves[0].request_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         events = tuple(self._load_events.get(layer_name, ()))
@@ -303,8 +328,10 @@ class KVStoreConnector(KVConnectorBase_V1):
             self._transfers[(request_id, generation)].event = tuple(
                 layer_events[0] for layer_events in events.values()
             )
-        except Exception:
+        except Exception as error:
             self._load_errors.update(plan.block_ids)
+            if self._transport is not None and hasattr(self._transport, "record_failure"):
+                self._transport.record_failure("load", error)
             self._transfers.pop((request_id, generation), None)
 
     def _cancelled(self, request_id: str, generation: int) -> bool:
@@ -317,7 +344,8 @@ class KVStoreConnector(KVConnectorBase_V1):
         if request_id is None and len(self._load) == 1:
             request_id = next(iter(self._load))
         self.save_kv_layer_for_request(request_id, layer_name, kv_layer)
-        if request_id is None or self._save_stream is None:
+        if (request_id is None or self._save_stream is None or
+                (self._transport is None and self._put is None)):
             return
         save = self._load.get(request_id)
         if save is None or layer_name not in self._kv_caches:
@@ -392,6 +420,12 @@ class KVStoreConnector(KVConnectorBase_V1):
             if candidate is None:
                 break
             request_id, key = candidate
+            with self._lock:
+                if request_id in self._external_full_hits:
+                    self._load.pop(request_id, None)
+                    self._pending.pop(request_id, None)
+                    self._external_full_hits.discard(request_id)
+                    continue
             attempted.add(request_id)
             with self._lock:
                 if request_id in self._saving:
@@ -468,17 +502,22 @@ class KVStoreConnector(KVConnectorBase_V1):
         physical = self._ids(block_ids)
         request_id = str(getattr(request, "request_id", request))
         tokens = tuple(int(x) for x in getattr(request, "prompt_token_ids", request))
+        block_size = int(getattr(getattr(self._vllm_config, "cache_config", None),
+                                 "block_size", 16))
+        complete_tokens = len(tokens) - len(tokens) % block_size
+        complete_blocks = complete_tokens // block_size
         with self._lock:
             save = self._save_plans.get(request_id)
             if save is not None:
                 self._save_plans[request_id] = _Load(
-                    request_id, len(tokens), physical, save.generation, tokens)
+                    request_id, complete_tokens, physical[:complete_blocks],
+                    save.generation, tokens[:complete_tokens], save.skip_save)
         if num_external_tokens > 0:
             with self._lock:
                 self._pending[request_id] = tokens[:num_external_tokens]
                 plan = self._load_plans.get(request_id)
                 generation = plan.generation if plan is not None else self._next_generation(request_id)
-                blocks_per_hit = max(1, (num_external_tokens + 15) // 16)
+                blocks_per_hit = max(1, (num_external_tokens + block_size - 1) // block_size)
                 self._load_plans[request_id] = _Load(
                     request_id, num_external_tokens, physical[:blocks_per_hit], generation,
                     tokens[:num_external_tokens]
@@ -497,10 +536,11 @@ class KVStoreConnector(KVConnectorBase_V1):
         with self._lock:
             loads = tuple(self._load_plans.values())
             saves = tuple(
-                _Load(request_id, len(tokens), self._save_plans[request_id].block_ids,
-                      self._load[request_id].generation, tuple(tokens))
-                for request_id, tokens in self._pending.items()
-                if request_id in self._save_plans and request_id in self._load
+                _Load(request_id, plan.token_count, plan.block_ids,
+                      self._load[request_id].generation, plan.token_ids,
+                      plan.skip_save or request_id in self._external_full_hits)
+                for request_id, plan in self._save_plans.items()
+                if request_id in self._load and plan.token_count > 0
             )
             self._load_plans.clear()
             self._save_plans.clear()

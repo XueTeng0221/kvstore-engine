@@ -111,6 +111,8 @@ class Response:
     payload: bytes = b""
     payload_checksum: int = 0
     recompute: bool = False
+    disk_bytes: int = 0
+    disk_hit: bool = False
 
 
 _TRACE = {1: ("request_id", "s"), 2: ("model_id", "s"), 3: ("tenant_id", "s")}
@@ -145,7 +147,8 @@ _RESPONSE = {
     8: ("lease_id", "v"), 9: ("hit_tokens", "v"), 10: ("hit_ranges", (TokenRange, _RANGE, True)),
     11: ("recompute_ranges", (TokenRange, _RANGE, True)), 12: ("chunk_indices", "p"),
     13: ("layer_begin", "v"), 14: ("layer_count", "v"), 15: ("payload", "y"),
-    16: ("payload_checksum", "v"), 17: ("recompute", "b"),
+    16: ("payload_checksum", "v"), 17: ("recompute", "b"), 18: ("disk_bytes", "v"),
+    19: ("disk_hit", "b"),
 }
 
 

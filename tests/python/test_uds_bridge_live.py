@@ -39,9 +39,14 @@ class LiveUdsBridgeTest(unittest.TestCase):
             self.assertTrue(selector.select(timeout=5), "fixture readiness timed out")
             self.assertEqual(os.read(self.proc.stdout.fileno(), 6), b"READY\n")
 
-    def spawn(self, path, mode=None):
+    def spawn(self, path, mode=None, disk_directory=None):
+        arguments = [os.environ["KVSTORE_UDS_FIXTURE"], path, "tenant", "test-model"]
+        if mode:
+            arguments.append(mode)
+        if disk_directory:
+            arguments.append(disk_directory)
         proc = subprocess.Popen(
-            [os.environ["KVSTORE_UDS_FIXTURE"], path, "tenant", "test-model"] + ([mode] if mode else []),
+            arguments,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(self.cleanup_process, proc)
         return proc
@@ -145,6 +150,54 @@ class LiveUdsBridgeTest(unittest.TestCase):
         reconnected = session.lookup(description, (1, 2, 3, 4), exact=True)
         self.assertEqual(reconnected.hit_tokens, 4)
         session.release(reconnected.lease_id)
+
+    def test_disk_tier_hit_reports_bytes_after_resident_eviction(self):
+        disk = tempfile.TemporaryDirectory()
+        self.addCleanup(disk.cleanup)
+        self.cleanup_process(self.proc)
+        Path(self.path).unlink(missing_ok=True)
+        self.proc = self.spawn(self.path, "disk", disk.name)
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.proc.stdout, selectors.EVENT_READ)
+            self.assertTrue(selector.select(timeout=5), "fixture startup timeout")
+            self.assertEqual(os.read(self.proc.stdout.fileno(), 6), b"READY\n")
+        session = Session(self.path, tenant_id="tenant", model_id="test-model", timeout=2)
+        self.addCleanup(session.close)
+        payload = b"d" * 128
+        description = integration.TensorManifest(
+            version=1, tenant_id="tenant", model_id="test-model",
+            model_revision="rev", tokenizer_revision="tok", cache_format="disk",
+            cache_format_version=1, token_digest=integration.token_digest((9, 8, 7, 6)),
+            token_count=4, layer_count=1, dtype=1, shape=[2, 1, 4, 2, 4],
+            axis_order=[1, 2, 3, 5, 6], strides_bytes=[64, 64, 16, 8, 2], layout=1,
+            key_value_packing=1, device_kind=1, tensor_parallel_size=1,
+            pipeline_parallel_size=1, payload_bytes=len(payload), chunk_bytes=128,
+            chunk_alignment_bytes=64, chunk_count=1,
+            payload_digest=__import__("hashlib").sha256(payload).digest())
+        committed = session.publish(description, (payload,))
+        session.release(committed.lease_id)
+        hit = session.lookup(description, (9, 8, 7, 6), exact=True)
+        self.assertTrue(hit.disk_hit)
+        self.assertEqual(hit.disk_bytes, len(payload))
+        self.assertEqual(session.get_chunks(hit), payload)
+        session.close()
+        self.proc.stdin.write(b"stop\n")
+        self.proc.stdin.flush()
+        self.assertEqual(self.proc.wait(timeout=3), 0)
+        self.proc = self.spawn(self.path, "disk", disk.name)
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.proc.stdout, selectors.EVENT_READ)
+            self.assertTrue(selector.select(timeout=5), "fixture restart timeout")
+            ready = os.read(self.proc.stdout.fileno(), 6)
+            if ready != b"READY\n":
+                self.proc.kill()
+                self.proc.wait()
+                self.fail(f"fixture restart output={ready!r} stderr={self.proc.stderr.read()!r}")
+        restarted = Session(self.path, tenant_id="tenant", model_id="test-model", timeout=2)
+        self.addCleanup(restarted.close)
+        persisted = restarted.lookup(description, (9, 8, 7, 6), exact=True)
+        self.assertTrue(persisted.disk_hit)
+        self.assertEqual(restarted.get_chunks(persisted), payload)
 
     @staticmethod
     def frame(req):

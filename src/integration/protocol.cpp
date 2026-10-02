@@ -1,5 +1,7 @@
 #include "kvstore/integration/protocol.hpp"
 
+#include "kvstore/common/crc32.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -244,8 +246,10 @@ Result<kvcache::TensorManifest> FromProto(const v1::TensorManifest& p, ManifestU
   return Status{StatusCode::kLimitExceeded, "manifest allocation"};
 }
 
-Session::Session(kvcache::ChunkRegistry& r, kvcache::MatchIndex& i, std::string t, std::string m)
-    : registry_(r), index_(i), tenant_(std::move(t)), model_(std::move(m)) {
+Session::Session(kvcache::ChunkRegistry& r, kvcache::MatchIndex& i, std::string t, std::string m,
+                 kvcache::TieredStore* tiered_store)
+    : registry_(r), index_(i), tiered_store_(tiered_store), tenant_(std::move(t)),
+      model_(std::move(m)) {
   reservations_.reserve(kMaxHandles);
   leases_.reserve(kMaxHandles);
 }
@@ -261,9 +265,14 @@ Status Session::PrepareLease(const kvcache::TensorManifest& m, v1::Response& out
   out.set_lease_id(id);
   return Status::Ok();
 }
-Status Session::Pin(kvcache::ResidentHandle h, v1::Response& out) {
-  if (auto status = PrepareLease(h.manifest(), out); !status.ok()) return status;
-  leases_.push_back({out.lease_id(), std::move(h)});
+Status Session::Pin(std::variant<kvcache::ResidentHandle, kvcache::TieredResidentHandle> h,
+                    v1::Response& out, bool disk_hit) {
+  const auto& manifest = std::visit(
+      [](const auto& handle) -> const kvcache::TensorManifest& { return handle.manifest(); }, h);
+  if (auto status = PrepareLease(manifest, out); !status.ok()) return status;
+  out.set_disk_hit(disk_hit);
+  out.set_disk_bytes(disk_hit ? manifest.payload_bytes : 0);
+  leases_.push_back({out.lease_id(), std::move(h), disk_hit});
   return Status::Ok();
 }
 Status Session::Execute(const v1::Request& r, v1::Response& out) {
@@ -329,7 +338,18 @@ Status Session::Execute(const v1::Request& r, v1::Response& out) {
                            : index_.LongestPrefix(m.value(), tokens, prefixes);
     if (!match.ok()) return match.status();
     auto h = registry_.Lookup(match.value().source_manifest);
-    if (!h.ok()) return h.status();
+    bool disk_hit = false;
+    std::optional<std::variant<kvcache::ResidentHandle, kvcache::TieredResidentHandle>> leased;
+    if (h.ok()) {
+      leased.emplace(std::move(h.value()));
+    } else if (tiered_store_ != nullptr) {
+      auto disk = tiered_store_->Lookup(match.value().source_manifest);
+      if (!disk.ok()) return disk.status();
+      leased.emplace(std::move(disk.value()));
+      disk_hit = true;
+    } else {
+      return h.status();
+    }
     const auto& hit = match.value();
     out.set_hit_tokens(hit.hit_tokens);
     auto* range = out.add_hit_ranges();
@@ -344,7 +364,7 @@ Status Session::Execute(const v1::Request& r, v1::Response& out) {
     out.set_layer_begin(hit.layer_begin);
     out.set_layer_count(hit.layer_count);
     out.set_recompute(!hit.missing_tokens.empty());
-    return Pin(std::move(h.value()), out);
+    return Pin(std::move(*leased), out, disk_hit);
   }
   if (r.operation() == v1::GET || r.operation() == v1::RELEASE) {
     auto it = std::ranges::find(leases_, r.lease_id(), &Lease::id);
@@ -353,15 +373,21 @@ Status Session::Execute(const v1::Request& r, v1::Response& out) {
       leases_.erase(it);
       return Status::Ok();
     }
-    auto bytes = it->handle.Chunk(r.chunk_index());
+    auto bytes = std::visit(
+        [&](const auto& handle) { return handle.Chunk(r.chunk_index()); }, it->handle);
     if (!bytes.ok()) return bytes.status();
     // Reserve generous response metadata overhead before copying a chunk.
     if (bytes.value().size() > Codec::kMaxFrame - 4096)
       return {StatusCode::kLimitExceeded, "chunk response budget"};
     out.set_payload(bytes.value().data(), bytes.value().size());
-    auto crc = it->handle.ChunkChecksum(r.chunk_index());
-    if (!crc.ok()) return crc.status();
-    out.set_payload_checksum(crc.value());
+    if (std::holds_alternative<kvcache::TieredResidentHandle>(it->handle)) {
+      out.set_payload_checksum(Crc32(
+          {reinterpret_cast<const std::byte*>(out.payload().data()), out.payload().size()}));
+    } else {
+      const auto crc = std::get<kvcache::ResidentHandle>(it->handle).ChunkChecksum(r.chunk_index());
+      if (!crc.ok()) return crc.status();
+      out.set_payload_checksum(crc.value());
+    }
     return Status::Ok();
   }
   if (r.operation() != v1::PUT && r.operation() != v1::COMMIT && r.operation() != v1::ABORT &&
@@ -392,8 +418,47 @@ Status Session::Execute(const v1::Request& r, v1::Response& out) {
     index_.RollbackInsert(key.value());
     return h.status();
   }
+  auto committed = std::move(h.value());
+  if (tiered_store_ != nullptr) {
+    const auto rollback_publication = [&] {
+      Status cleanup = tiered_store_->Delete(committed.manifest());
+      if (cleanup.code() == StatusCode::kNotFound) cleanup = Status::Ok();
+      const Status erased = index_.Erase(committed.manifest());
+      if (cleanup.ok() && !erased.ok() && erased.code() != StatusCode::kNotFound)
+        cleanup = erased;
+      const Status deleted = registry_.Delete(committed.manifest());
+      if (cleanup.ok() && !deleted.ok() && deleted.code() != StatusCode::kNotFound)
+        cleanup = deleted;
+      reservations_.erase(it);
+      return cleanup;
+    };
+    std::vector<ByteView> chunks;
+    chunks.reserve(committed.chunk_count());
+    for (std::size_t index = 0; index < committed.chunk_count(); ++index) {
+      auto chunk = committed.Chunk(index);
+      if (!chunk.ok()) {
+        const auto cleanup = rollback_publication();
+        return cleanup.ok() ? chunk.status() : cleanup;
+      }
+      chunks.push_back(chunk.value());
+    }
+    auto stored = tiered_store_->Put(committed.manifest(), chunks);
+    if (!stored.ok()) {
+      const auto cleanup = rollback_publication();
+      return cleanup.ok() ? stored.status() : cleanup;
+    }
+    if (auto evicted = tiered_store_->Evict(committed.manifest()); !evicted.ok())
+    {
+      const auto cleanup = rollback_publication();
+      return cleanup.ok() ? evicted : cleanup;
+    }
+    if (auto deleted = registry_.Delete(committed.manifest()); !deleted.ok()) {
+      const auto cleanup = rollback_publication();
+      return cleanup.ok() ? deleted : cleanup;
+    }
+  }
   reservations_.erase(it);
-  leases_.push_back({out.lease_id(), std::move(h.value())});
+  leases_.push_back({out.lease_id(), std::move(committed), false});
   return Status::Ok();
 }
 v1::Response Session::Dispatch(const v1::Request& r) {

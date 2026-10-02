@@ -1,11 +1,17 @@
 build/
 build-*/
 .venv**/
+
 .cache/
 compile_commands.json
 Testing/
+
 *.profraw
 *.profdata
+
+# models artifacts
 artifacts/*
+
 .codemap/
-**/__pycache__/
+
+*.pyc

@@ -110,6 +110,20 @@ TEST(KvCacheModelTest, CanonicalKeyIsDeterministicAndExcludesTimestamps) {
   EXPECT_NE(first_key.value(), isolated_key.value());
 }
 
+TEST(KvCacheModelTest, CanonicalManifestRoundTripsForDiskIndexRebuild) {
+  const TensorManifest expected = Manifest();
+  const auto encoded = EncodeCanonicalManifest(expected);
+  ASSERT_TRUE(encoded.ok());
+  const auto decoded = DecodeCanonicalManifest(encoded.value());
+  ASSERT_TRUE(decoded.ok()) << decoded.status().message();
+  const auto reencoded = EncodeCanonicalManifest(decoded.value());
+  ASSERT_TRUE(reencoded.ok());
+  EXPECT_EQ(reencoded.value(), encoded.value());
+  EXPECT_EQ(decoded.value().tenant_id, expected.tenant_id);
+  EXPECT_EQ(decoded.value().token_count, expected.token_count);
+  EXPECT_EQ(decoded.value().shape, expected.shape);
+}
+
 TEST(KvCacheModelTest, IdentityChangesInvalidateKeys) {
   const auto base = CanonicalCacheKey(Manifest());
   ASSERT_TRUE(base.ok());

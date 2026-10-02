@@ -77,8 +77,9 @@ void UnlinkOwnedAt(int parent_fd, const std::string& name, const struct stat& ow
 }  // namespace
 
 UdsBridge::UdsBridge(kvcache::ChunkRegistry& r, kvcache::MatchIndex& i, std::string p,
-                     std::string t, std::string m)
-    : registry_(r), index_(i), path_(std::move(p)), tenant_(std::move(t)), model_(std::move(m)) {
+                     std::string t, std::string m, std::filesystem::path disk_directory)
+    : registry_(r), index_(i), path_(std::move(p)), tenant_(std::move(t)), model_(std::move(m)),
+      disk_directory_(std::move(disk_directory)) {
   clients_.reserve(kMaxClients);
   client_threads_.reserve(kMaxClients);
 }
@@ -156,6 +157,49 @@ Status UdsBridge::Start() {
       owns_path_ = false;
       return {StatusCode::kIoError, std::strerror(errno)};
     }
+    if (!disk_directory_.empty()) {
+      kvcache::TieredStoreConfig config;
+      config.directory = disk_directory_;
+      config.resident = {.budget_bytes = 1ULL * 1024U * 1024U * 1024U,
+                         .high_watermark_bytes = 1ULL * 1024U * 1024U * 1024U,
+                         .low_watermark_bytes = 0};
+      config.disk_budget_bytes = 1ULL * 1024U * 1024U * 1024U;
+      auto opened = kvcache::TieredStore::Open(std::move(config));
+      if (!opened.ok()) {
+        ::close(fd);
+        UnlinkOwnedAt(owned_parent_fd_, owned_name_, socket_info);
+        ::close(owned_parent_fd_);
+        owned_parent_fd_ = -1;
+        owns_path_ = false;
+        return opened.status();
+      }
+      tiered_store_ = std::move(opened.value());
+      auto manifests = tiered_store_->ListManifests();
+      if (!manifests.ok()) {
+        tiered_store_.reset();
+        ::close(fd);
+        UnlinkOwnedAt(owned_parent_fd_, owned_name_, socket_info);
+        ::close(owned_parent_fd_);
+        owned_parent_fd_ = -1;
+        owns_path_ = false;
+        return manifests.status();
+      }
+      for (const auto& manifest : manifests.value()) {
+        auto key = kvcache::CanonicalCacheKey(manifest);
+        auto inserted = key.ok() ? index_.Insert(manifest, key.value()) : key.status();
+        if (!inserted.ok()) {
+          tiered_store_.reset();
+          ::close(fd);
+          UnlinkOwnedAt(owned_parent_fd_, owned_name_, socket_info);
+          ::close(owned_parent_fd_);
+          owned_parent_fd_ = -1;
+          owns_path_ = false;
+          return {StatusCode::kCorruption,
+                  std::string("failed to rebuild disk match index: ") +
+                      std::string(inserted.message())};
+        }
+      }
+    }
     listen_fd_ = fd;
     rollback.release();
     stopping_ = false;
@@ -198,6 +242,7 @@ void UdsBridge::Stop() noexcept {
   for (auto& worker : client_threads_)
     if (worker.thread.joinable()) worker.thread.join();
   client_threads_.clear();
+  tiered_store_.reset();
   struct stat owned {};
   owned.st_dev = owned_dev_;
   owned.st_ino = owned_ino_;
@@ -292,7 +337,7 @@ void UdsBridge::HandleClient(int client) noexcept {
       ::close(client);
       return;
     }
-    Session session(registry_, index_, tenant_, model_);
+    Session session(registry_, index_, tenant_, model_, tiered_store_.get());
     while (!stopping_) {
       std::array<std::byte, 4> size_bytes{};
       if (!ReadExact(client, size_bytes.data(), size_bytes.size())) break;

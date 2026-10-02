@@ -526,7 +526,7 @@ struct TieredStore::Impl {
   explicit Impl(TieredStoreConfig value) : config(std::move(value)), pool(config.resident) {}
   TieredStoreConfig config;
   ResidentPool pool;
-  mutable std::mutex mutex;
+  mutable std::recursive_mutex mutex;
   std::unordered_map<std::string, std::shared_ptr<Entry>> entries;
   std::uint64_t disk_used{};
   std::uint64_t disk_reserved{};
@@ -1158,6 +1158,20 @@ TieredStoreStats TieredStore::Stats() const {
   return {impl_->pool.Stats(), impl_->disk_used, impl_->config.disk_budget_bytes,
           impl_->disk_reads.load(std::memory_order_relaxed),
           static_cast<std::uint64_t>(impl_->entries.size())};
+}
+
+Result<std::vector<TensorManifest>> TieredStore::ListManifests() const {
+  std::lock_guard lock(impl_->mutex);
+  std::vector<TensorManifest> manifests;
+  manifests.reserve(impl_->entries.size());
+  for (const auto& [key, entry] : impl_->entries) {
+    (void)key;
+    auto manifest = DecodeCanonicalManifest(entry->canonical);
+    if (!manifest.ok()) return manifest.status();
+    manifest.value().payload_digest = entry->payload_digest;
+    manifests.push_back(std::move(manifest.value()));
+  }
+  return manifests;
 }
 
 }  // namespace kvstore::kvcache

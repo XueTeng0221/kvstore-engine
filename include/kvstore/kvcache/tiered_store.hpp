@@ -149,6 +149,7 @@ class TieredStore {
   [[nodiscard]] Status Delete(const TensorManifest& expected);
   [[nodiscard]] Result<TierState> State(const TensorManifest& expected) const;
   [[nodiscard]] TieredStoreStats Stats() const;
+  [[nodiscard]] Result<std::vector<TensorManifest>> ListManifests() const;
 
  private:
   struct Impl;

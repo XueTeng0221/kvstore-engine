@@ -1,11 +1,14 @@
 #pragma once
 
 #include <mutex>
+#include <optional>
 #include <span>
+#include <variant>
 #include <vector>
 
 #include "kvstore/kvcache/chunk_registry.hpp"
 #include "kvstore/kvcache/match_index.hpp"
+#include "kvstore/kvcache/tiered_store.hpp"
 #include "kvstore_integration_v1.pb.h"
 
 namespace kvstore::integration {
@@ -39,7 +42,7 @@ enum class ManifestUse { kPublication, kQuery };
 class Session {
  public:
   Session(kvcache::ChunkRegistry& registry, kvcache::MatchIndex& index, std::string tenant,
-          std::string model);
+           std::string model, kvcache::TieredStore* tiered_store = nullptr);
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
@@ -56,13 +59,17 @@ class Session {
   };
   struct Lease {
     std::uint64_t id;
-    kvcache::ResidentHandle handle;
+    std::variant<kvcache::ResidentHandle, kvcache::TieredResidentHandle> handle;
+    bool disk_hit{};
   };
   [[nodiscard]] Status Execute(const v1::Request&, v1::Response&);
-  [[nodiscard]] Status Pin(kvcache::ResidentHandle, v1::Response&);
+  [[nodiscard]] Status Pin(std::variant<kvcache::ResidentHandle,
+                                         kvcache::TieredResidentHandle>,
+                           v1::Response&, bool disk_hit = false);
   [[nodiscard]] Status PrepareLease(const kvcache::TensorManifest&, v1::Response&);
   kvcache::ChunkRegistry& registry_;
   kvcache::MatchIndex& index_;
+  kvcache::TieredStore* tiered_store_{};
   const std::string tenant_, model_;
   std::mutex mutex_;
   bool negotiated_{};

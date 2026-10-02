@@ -84,6 +84,9 @@ def main() -> int:
             "disk_bytes": metric("disk_bytes"),
             "network_bytes": metric("network_bytes"),
             "cpu_percent": metric("cpu_percent"),
+            "disk_hit": any(item.get("disk_hit") is True for item in metrics),
+            "disk_metrics_available": any(
+                "disk_bytes" in item or "disk_hit" in item for item in metrics),
         })
     baseline = next((row for row in rows if row["mode"] == "cold_miss"), None)
     for row in rows:
@@ -102,7 +105,7 @@ def main() -> int:
     args.output.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        lines = ["# P8 Performance Matrix", "", "| mode | mean ms | p50 | p95 | p99 | TTFT | TPOT | QPS | H/T | prefill save | throughput gain |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        lines = ["# P8 Performance Matrix", "", "| mode | mean ms | p50 | p95 | p99 | TTFT | TPOT | QPS | H/T | disk hit | disk bytes | CPU | prefill save | throughput gain |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         for row in rows:
             hit = "n/a" if row["recompute_avoidance_percent"] is None else f'{row["recompute_avoidance_percent"]:.2f}%'
             def fmt(name):
@@ -110,7 +113,8 @@ def main() -> int:
                 return "n/a" if value is None else f"{value:.3f}"
             gain = "n/a" if row["throughput_gain_percent"] is None else f'{row["throughput_gain_percent"]:.2f}%'
             saving = "n/a" if row["compute_savings_percent"] is None else f'{row["compute_savings_percent"]:.2f}%'
-            lines.append(f'| {row["mode"]} | {row["latency_ms_mean"]:.3f} | {row["latency_ms_p50"]:.3f} | {row["latency_ms_p95"]:.3f} | {row["latency_ms_p99"]:.3f} | {fmt("ttft_ms")} | {fmt("tpot_ms")} | {fmt("qps")} | {hit} | {saving} | {gain} |')
+            disk = "yes" if row["disk_hit"] else "no"
+            lines.append(f'| {row["mode"]} | {row["latency_ms_mean"]:.3f} | {row["latency_ms_p50"]:.3f} | {row["latency_ms_p95"]:.3f} | {row["latency_ms_p99"]:.3f} | {fmt("ttft_ms")} | {fmt("tpot_ms")} | {fmt("qps")} | {hit} | {disk} | {fmt("disk_bytes")} | {fmt("cpu_percent")} | {saving} | {gain} |')
         lines += ["", "The endpoint must return numeric `kvstore_metrics` fields for TTFT, TPOT, QPS, GPU prefill, profiler FLOPs, bytes and CPU; missing counters remain null rather than being fabricated.", ""]
         args.report.write_text("\n".join(lines))
     print(json.dumps({"output": str(args.output), "rows": len(rows)}))

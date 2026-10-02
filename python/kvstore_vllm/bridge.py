@@ -59,7 +59,14 @@ class VllmSessionBridge:
         shape = tuple(int(value) for value in tensor_shape)
         if len(shape) == 5 and shape[1] == 2:
             block_tokens, num_kv_heads, head_size = shape[2:]
-        elif len(shape) == 4 and shape[0] == 2:
+        elif len(shape) == 4 and shape[1] == 2 and shape[0] != 2:
+            block_tokens = shape[2]
+            if self._geometry.num_kv_heads <= 0 or self._geometry.head_size <= 0:
+                raise ValueError("flattened runtime KV layout needs configured head geometry")
+            num_kv_heads, head_size = self._geometry.num_kv_heads, self._geometry.head_size
+            if shape[3] != num_kv_heads * head_size:
+                raise ValueError("flattened runtime KV width does not match head geometry")
+        elif len(shape) == 4 and shape[0] == 2 and shape[1] != 2:
             block_tokens = shape[2]
             if self._geometry.num_kv_heads <= 0 or self._geometry.head_size <= 0:
                 raise ValueError("flattened runtime KV layout needs configured head geometry")
@@ -67,7 +74,7 @@ class VllmSessionBridge:
             if shape[3] != num_kv_heads * head_size:
                 raise ValueError("flattened runtime KV width does not match head geometry")
         else:
-            raise ValueError(f"unsupported runtime KV cache shape: {shape}")
+            raise ValueError(f"ambiguous or unsupported runtime KV cache shape: {shape}")
         self._geometry = _Geometry(
             tuple(str(name) for name in layer_names), block_tokens,
             num_kv_heads, head_size, self._geometry.dtype,
@@ -153,13 +160,15 @@ class VllmSessionBridge:
             response = self._session.lookup(manifest, tokens, exact=False,
                                             prefix_lengths=prefixes, cancel=event)
         except SessionError:
-            self._record("lookup", request_id=request_id, hit_tokens=0)
+            self._record("lookup", request_id=request_id, hit_tokens=0,
+                         disk_hit=False, disk_bytes=0)
             return {"hit_tokens": 0}
         finally:
             with self._lock:
                 self._cancel.pop(request_id, None)
         try:
-            self._record("lookup", request_id=request_id, hit_tokens=response.hit_tokens)
+            self._record("lookup", request_id=request_id, hit_tokens=response.hit_tokens,
+                         disk_hit=response.disk_hit, disk_bytes=response.disk_bytes)
             return {"hit_tokens": response.hit_tokens}
         finally:
             if response.lease_id:
@@ -175,10 +184,15 @@ class VllmSessionBridge:
         manifest = self._manifest(plan.token_ids)
         try:
             response = self._session.lookup(manifest, plan.token_ids, exact=False,
+                                            prefix_lengths=range(
+                                                self._geometry.block_tokens,
+                                                len(plan.token_ids) + 1,
+                                                self._geometry.block_tokens),
                                             cancel=event)
             payload = self._session.get_chunks(response, cancel=event)
             self._record("get_pages", request_id=request_id,
-                         hit_tokens=response.hit_tokens, payload_bytes=len(payload))
+                         hit_tokens=response.hit_tokens, payload_bytes=len(payload),
+                         disk_hit=response.disk_hit, disk_bytes=response.disk_bytes)
             if len(payload) != manifest.payload_bytes:
                 raise ValueError("P8.1 payload size does not match vLLM manifest")
             shape = tuple(manifest.shape)
@@ -187,6 +201,9 @@ class VllmSessionBridge:
             }[manifest.dtype]).reshape(shape)
             return {name: value[index].clone().pin_memory()
                     for index, name in enumerate(self._geometry.layer_names)}
+        except Exception as error:
+            self._record("get_pages_error", request_id=request_id, error=str(error))
+            raise
         finally:
             with self._lock:
                 self._cancel.pop(request_id, None)
@@ -214,8 +231,15 @@ class VllmSessionBridge:
         manifest = self._manifest(tokens, hashlib.sha256(payload).digest())
         if len(payload) != manifest.payload_bytes:
             raise ValueError("publication tensor geometry does not match token count")
-        response = self._session.publish(manifest, pb.payload_chunks(payload,
-                                                                      manifest.chunk_bytes))
+        try:
+            response = self._session.publish(
+                manifest, pb.payload_chunks(payload, manifest.chunk_bytes))
+        except SessionError as error:
+            if error.response.status == pb.ALREADY_EXISTS:
+                self._record("publish_duplicate", token_count=len(tokens),
+                             payload_bytes=len(payload))
+                return
+            raise
         self._record("publish", token_count=len(tokens), payload_bytes=len(payload))
         if response.lease_id:
             self._session.release(response.lease_id)

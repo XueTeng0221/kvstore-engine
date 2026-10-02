@@ -107,6 +107,7 @@ struct CacheKey {
 [[nodiscard]] Status ValidateManifest(const TensorManifest& manifest);
 [[nodiscard]] Status ValidateManifestIdentity(const TensorManifest& manifest);
 [[nodiscard]] Result<Bytes> EncodeCanonicalManifest(const TensorManifest& manifest);
+[[nodiscard]] Result<TensorManifest> DecodeCanonicalManifest(ByteView bytes);
 [[nodiscard]] Result<CacheKey> CanonicalCacheKey(const TensorManifest& manifest);
 [[nodiscard]] Result<Digest> Sha256(ByteView data);
 [[nodiscard]] Result<Digest> Sha256Parts(std::span<const ByteView> parts);

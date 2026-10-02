@@ -106,4 +106,6 @@ message Response {
   bytes payload = 15;
   uint32 payload_checksum = 16;
   bool recompute = 17;
+  uint64 disk_bytes = 18;
+  bool disk_hit = 19;
 }

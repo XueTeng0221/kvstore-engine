@@ -92,6 +92,25 @@ bool HasAxisOrder(const TensorManifest& manifest, std::initializer_list<TensorAx
   return std::ranges::equal(manifest.axis_order, expected);
 }
 
+template <typename T>
+bool ReadBig(ByteView bytes, std::size_t& offset, T& value) {
+  if (bytes.size() - offset < sizeof(T)) return false;
+  value = 0;
+  for (std::size_t index = 0; index < sizeof(T); ++index)
+    value = static_cast<T>((value << 8U) |
+                            std::to_integer<std::uint8_t>(bytes[offset++]));
+  return true;
+}
+
+bool ReadText(ByteView bytes, std::size_t& offset, std::string& value) {
+  std::uint32_t size = 0;
+  if (!ReadBig(bytes, offset, size) || size > kMaxIdentityBytes ||
+      size > bytes.size() - offset) return false;
+  value.assign(reinterpret_cast<const char*>(bytes.data() + offset), size);
+  offset += size;
+  return true;
+}
+
 }  // namespace
 
 Status ValidateManifestIdentity(const TensorManifest& manifest) {
@@ -273,6 +292,63 @@ Result<Bytes> EncodeCanonicalManifest(const TensorManifest& manifest) {
     return Status{StatusCode::kLimitExceeded, "unable to allocate canonical manifest"};
   }
   return output;
+}
+
+Result<TensorManifest> DecodeCanonicalManifest(ByteView bytes) try {
+  TensorManifest manifest;
+  std::size_t offset = 0;
+  std::uint8_t tag = 0, dtype = 0, layout = 0, packing = 0, device = 0, compression = 0;
+  std::uint16_t version = 0;
+  std::uint32_t count = 0;
+  if (bytes.size() < 6 || !ReadBig(bytes, offset, tag) || tag != 'K' ||
+      !ReadBig(bytes, offset, tag) || tag != 'V' || !ReadBig(bytes, offset, tag) || tag != 'C' ||
+      !ReadBig(bytes, offset, tag) || tag != '1' || !ReadBig(bytes, offset, version) ||
+      version != kManifestVersion || !ReadText(bytes, offset, manifest.tenant_id) ||
+      !ReadText(bytes, offset, manifest.model_id) || !ReadText(bytes, offset, manifest.model_revision) ||
+      !ReadText(bytes, offset, manifest.adapter_id) || !ReadText(bytes, offset, manifest.adapter_revision) ||
+      !ReadText(bytes, offset, manifest.tokenizer_revision) ||
+      !ReadText(bytes, offset, manifest.cache_format) || !ReadBig(bytes, offset, manifest.cache_format_version))
+    return Status{StatusCode::kCorruption, "invalid canonical manifest header"};
+  manifest.version = version;
+  if (bytes.size() - offset < kDigestBytes)
+    return Status{StatusCode::kCorruption, "invalid canonical manifest fields"};
+  std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(offset), kDigestBytes,
+              manifest.token_digest.begin());
+  offset += kDigestBytes;
+  if (!ReadBig(bytes, offset, manifest.token_count) ||
+      !ReadBig(bytes, offset, manifest.layer_begin) || !ReadBig(bytes, offset, manifest.layer_count) ||
+      !ReadBig(bytes, offset, dtype) || !ReadBig(bytes, offset, count) || count > kMaxShapeDimensions)
+    return Status{StatusCode::kCorruption, "invalid canonical manifest fields"};
+  manifest.dtype = static_cast<DType>(dtype);
+  manifest.shape.reserve(count); manifest.axis_order.reserve(count); manifest.strides_bytes.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) {
+    std::uint8_t axis = 0; std::uint64_t shape = 0, stride = 0;
+    if (!ReadBig(bytes, offset, axis) || !ReadBig(bytes, offset, shape) ||
+        !ReadBig(bytes, offset, stride))
+      return Status{StatusCode::kCorruption, "truncated canonical shape"};
+    manifest.axis_order.push_back(static_cast<TensorAxis>(axis));
+    manifest.shape.push_back(shape); manifest.strides_bytes.push_back(stride);
+  }
+  if (!ReadBig(bytes, offset, layout) || !ReadBig(bytes, offset, packing) ||
+      !ReadBig(bytes, offset, manifest.block_tokens) || !ReadBig(bytes, offset, device) ||
+      !ReadBig(bytes, offset, manifest.device.index) ||
+      !ReadBig(bytes, offset, manifest.tensor_parallel_rank) ||
+      !ReadBig(bytes, offset, manifest.tensor_parallel_size) ||
+      !ReadBig(bytes, offset, manifest.pipeline_parallel_rank) ||
+      !ReadBig(bytes, offset, manifest.pipeline_parallel_size) ||
+      !ReadBig(bytes, offset, manifest.payload_bytes) || !ReadBig(bytes, offset, manifest.chunk_bytes) ||
+      !ReadBig(bytes, offset, manifest.chunk_alignment_bytes) ||
+      !ReadBig(bytes, offset, manifest.chunk_count) || !ReadBig(bytes, offset, compression) ||
+      offset != bytes.size())
+    return Status{StatusCode::kCorruption, "truncated canonical manifest metadata"};
+  manifest.layout = static_cast<TensorLayout>(layout);
+  manifest.key_value_packing = static_cast<KeyValuePacking>(packing);
+  manifest.device.kind = static_cast<DeviceKind>(device);
+  manifest.compression = static_cast<Compression>(compression);
+  if (auto status = ValidateManifestIdentity(manifest); !status.ok()) return status;
+  return manifest;
+} catch (const std::bad_alloc&) {
+  return Status{StatusCode::kLimitExceeded, "canonical manifest allocation"};
 }
 
 Result<Digest> Sha256Parts(std::span<const ByteView> parts) try {

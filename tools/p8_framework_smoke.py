@@ -9,6 +9,7 @@ import os
 import signal
 import re
 import socket
+import statistics
 import subprocess
 import sys
 import queue
@@ -19,6 +20,16 @@ from pathlib import Path
 
 
 MODEL = os.path.abspath("artifacts/models/Qwen2.5-0.5B")
+PYTHON_ROOT = str(Path(__file__).resolve().parents[1] / "python")
+
+
+def framework_environment() -> dict[str, str]:
+    """Make the project adapters importable in framework worker processes."""
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    entries = [PYTHON_ROOT]
+    if pythonpath:
+        entries.append(pythonpath)
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(entries)}
 
 
 def request(url: str, payload: dict | None = None) -> dict:
@@ -80,11 +91,13 @@ def wait_http(process: subprocess.Popen[str], output: queue.Queue[str], framewor
     recent: list[str] = []
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"framework exited with status {process.returncode}")
+            detail = "\n".join(recent)
+            raise RuntimeError(
+                f"framework exited with status {process.returncode}; output:\n{detail}")
         try:
             line = output.get(timeout=0.2)
             recent.append(line.rstrip())
-            del recent[:-20]
+            del recent[:-200]
             match = re.search(r"127\.0\.0\.1:(\d+)", line)
             if match and int(match.group(1)) == port:
                 started = True
@@ -126,14 +139,16 @@ def main() -> int:
     parser.add_argument("--uds-path", help="P8.1 UDS path for external KVStore operations")
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=0)
-    parser.add_argument("--mode", choices=("cold_miss", "memory_prefix_hit",
-                                           "memory_full_hit"),
+    parser.add_argument("--mode", choices=("cold_miss", "disk_hit",
+                                            "memory_prefix_hit", "memory_full_hit"),
                         default="cold_miss")
     parser.add_argument("--profile-dir", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.runs < 1 or args.warmup < 0:
         raise SystemExit("runs must be positive and warmup non-negative")
+    if args.mode == "disk_hit" and not args.uds_path:
+        raise SystemExit("disk_hit mode requires --uds-path for disk audit evidence")
     model = os.path.abspath(args.model)
     audit_path = (args.output.with_suffix(".external.jsonl").resolve()
                   if args.output and args.uds_path else None)
@@ -141,7 +156,7 @@ def main() -> int:
         audit_path.unlink()
     if args.framework == "vllm":
         port = free_port()
-        env = {**os.environ, "VLLM_USE_FLASHINFER_SAMPLER": "0"}
+        env = {**framework_environment(), "VLLM_USE_FLASHINFER_SAMPLER": "0"}
         command = [
             sys.executable,
             "-m",
@@ -157,6 +172,7 @@ def main() -> int:
             "1024",
             "--max-num-seqs",
             "1",
+            "--no-enable-prefix-caching",
             "--gpu-memory-utilization",
             "0.25",
             "--disable-hybrid-kv-cache-manager",
@@ -191,7 +207,7 @@ def main() -> int:
                    "temperature": 0}
     else:
         port = free_port()
-        env = os.environ.copy()
+        env = framework_environment()
         command = [
             sys.executable,
             "-m",
@@ -237,7 +253,9 @@ def main() -> int:
                 "model_id": "Qwen2.5-0.5B",
                 "model_revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
                 "tokenizer_revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
-                **({"uds_path": os.path.abspath(args.uds_path)} if args.uds_path else {}),
+                **({"uds_path": os.path.abspath(args.uds_path),
+                    "audit_path": str(audit_path) if audit_path else None}
+                   if args.uds_path else {}),
             }),
         ]
         endpoint_path = "/generate"
@@ -274,6 +292,8 @@ def main() -> int:
                 prompt = cached_prompt
             elif args.mode == "memory_prefix_hit":
                 prompt = cached_prompt if warmup else cached_prompt + f" unique-tail-{index}"
+            elif args.mode == "disk_hit":
+                prompt = cached_prompt
             else:
                 prompt = " ".join(f"cold{index}-{part}" for part in range(96))
             if warmup and args.mode == "cold_miss":
@@ -336,11 +356,22 @@ def main() -> int:
                   "uds_path_configured": bool(args.uds_path),
                   "external_cache_required": bool(args.uds_path),
                    "profile_dir": str(args.profile_dir.resolve()) if args.profile_dir else None}
+        latencies = [row["latency_ms"] for row in rows]
+        ordered = sorted(latencies)
+        result["latency_ms_mean"] = statistics.fmean(latencies)
+        middle = len(ordered) // 2
+        result["latency_ms_p50"] = (
+            ordered[middle] if len(ordered) % 2 else
+            (ordered[middle - 1] + ordered[middle]) / 2.0)
+        result["qps"] = 1000.0 / result["latency_ms_mean"]
         cpu_seconds = child_cpu_seconds(process.pid)
         result["cpu_percent"] = (
             cpu_seconds / max(1e-9, time.monotonic() - process_started) * 100.0
             if cpu_seconds is not None else None)
         if audit_path:
+            if not audit_path.exists():
+                raise RuntimeError(
+                    "framework configured with external UDS but produced no audit records")
             records = [json.loads(line) for line in audit_path.read_text().splitlines()]
             result["external_operations"] = {
                 name: sum(record["operation"] == name for record in records)
@@ -357,11 +388,28 @@ def main() -> int:
                                     if any("disk_bytes" in record for record in records)
                                     else None)
             result["disk_hit"] = any(
-                record.get("operation") == "disk_hit" for record in records)
-            result["disk_metrics_available"] = any(
-                record.get("operation") == "disk_hit" or "disk_bytes" in record
+                record.get("operation") == "disk_hit" or record.get("disk_hit", False)
                 for record in records)
+            result["disk_metrics_available"] = any(
+                record.get("operation") == "disk_hit" or "disk_hit" in record or
+                "disk_bytes" in record
+                for record in records)
+            if not records:
+                raise RuntimeError("external UDS audit contains no operations")
+            if args.mode in {"memory_prefix_hit", "memory_full_hit"}:
+                hits = [record.get("hit_tokens", 0) for record in records
+                        if record.get("operation") == "get_pages"]
+                if not hits or max(hits) <= 0:
+                    raise RuntimeError(
+                        "external cache mode requested but no non-zero get_pages hit was recorded")
+                if args.framework == "sglang" and not any(
+                        record.get("operation") == "lookup" for record in records):
+                    raise RuntimeError("SGLang external audit lacks lookup records")
+            if args.mode == "disk_hit" and not result["disk_hit"]:
+                raise RuntimeError("disk_hit mode requires a disk_hit audit operation")
         else:
+            if args.uds_path:
+                raise RuntimeError("external UDS audit path was not configured")
             result["network_bytes"] = 0
             result["disk_bytes"] = None
             result["disk_hit"] = False

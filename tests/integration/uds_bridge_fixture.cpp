@@ -12,13 +12,15 @@
 #include "kvstore/kvcache/match_index.hpp"
 
 int main(int argc, char** argv) {
-  if (argc != 4 && argc != 5) return 2;
+  if (argc < 4 || argc > 6) return 2;
   kvstore::kvcache::ChunkRegistry registry;
   kvstore::kvcache::MatchIndex index;
   std::string path = argv[1];
-  const std::string mode = argc == 5 ? argv[4] : "";
+  const std::string mode = argc >= 5 ? argv[4] : "";
+  const std::filesystem::path disk_directory = mode == "disk" && argc == 6 ? argv[5] : "";
   if (mode == "nul") path.append("\0bad", 4);
-  kvstore::integration::UdsBridge bridge(registry, index, path, argv[2], argv[3]);
+  kvstore::integration::UdsBridge bridge(registry, index, path, argv[2], argv[3],
+                                        disk_directory);
   if (mode == "nul") {
     if (bridge.Start().code() != kvstore::StatusCode::kInvalidArgument) return 1;
     std::cout << "NUL REJECTED" << std::endl;

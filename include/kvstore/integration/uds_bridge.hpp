@@ -3,6 +3,7 @@
 #include <sys/types.h>
 
 #include <atomic>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "kvstore/integration/protocol.hpp"
+#include "kvstore/kvcache/tiered_store.hpp"
 
 namespace kvstore::integration {
 
@@ -18,7 +20,8 @@ namespace kvstore::integration {
 class UdsBridge final {
  public:
   UdsBridge(kvcache::ChunkRegistry& registry, kvcache::MatchIndex& index, std::string path,
-            std::string tenant, std::string model);
+            std::string tenant, std::string model,
+            std::filesystem::path disk_directory = {});
   ~UdsBridge();
   UdsBridge(const UdsBridge&) = delete;
   UdsBridge& operator=(const UdsBridge&) = delete;
@@ -35,6 +38,8 @@ class UdsBridge final {
   kvcache::ChunkRegistry& registry_;
   kvcache::MatchIndex& index_;
   std::string path_, tenant_, model_;
+  std::filesystem::path disk_directory_;
+  std::unique_ptr<kvcache::TieredStore> tiered_store_;
   std::atomic<bool> stopping_{false};
   std::atomic<int> listen_fd_{-1};
   std::mutex listener_mutex_;

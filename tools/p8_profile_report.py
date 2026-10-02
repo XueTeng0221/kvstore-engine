@@ -60,9 +60,13 @@ def main():
     args = parser.parse_args()
     rows = []
     for framework in ("vllm", "sglang"):
-        for suffix, mode in (("cold", "cold_miss"), ("prefix", "memory_prefix_hit"),
-                             ("hit", "memory_full_hit")):
-            raw = json.loads((args.benchmarks / f"p8-{framework}-{suffix}.json").read_text())
+        specs = [("cold", "cold_miss"), ("prefix", "memory_prefix_hit"),
+                 ("hit", "memory_full_hit"), ("external-disk", "disk_hit")]
+        for suffix, mode in specs:
+            raw_path = args.benchmarks / f"p8-{framework}-{suffix}.json"
+            if not raw_path.exists():
+                continue
+            raw = json.loads(raw_path.read_text())
             samples = raw["samples"]
             latencies = [sample["latency_ms"] for sample in samples]
             ttft = [sample["ttft_ms"] for sample in samples]
@@ -95,9 +99,13 @@ def main():
                 "qps": 1000.0 / statistics.fmean(latencies),
                 "input_tokens": input_tokens, "hit_tokens": hit_tokens,
                 "hit_tokens_source": hit_source,
-                "gpu_activity_ms": gpu_ms,
-                "gpu_activity_ms_per_request": gpu_ms / len(samples),
+                "gpu_activity_ms": gpu_ms if trace_files else None,
+                "gpu_activity_ms_per_request": gpu_ms / len(samples) if trace_files else None,
                 "profiler_flops": flops, "trace_files": trace_files,
+                "disk_bytes": raw.get("disk_bytes"),
+                "network_bytes": raw.get("network_bytes"),
+                "cpu_percent": raw.get("cpu_percent"),
+                "disk_hit": raw.get("disk_hit", False),
             })
     for framework in ("vllm", "sglang"):
         cold = next(row for row in rows if row["framework"] == framework and
@@ -108,7 +116,9 @@ def main():
             row["throughput_gain_percent"] = (row["qps"] / cold["qps"] - 1) * 100
             row["gpu_activity_savings_percent"] = (
                 (cold["gpu_activity_ms_per_request"] - row["gpu_activity_ms_per_request"])
-                / cold["gpu_activity_ms_per_request"] * 100)
+                / cold["gpu_activity_ms_per_request"] * 100
+                if cold["gpu_activity_ms_per_request"] is not None and
+                row["gpu_activity_ms_per_request"] is not None else None)
             row["profiler_flops_savings_percent"] = (
                 (cold["profiler_flops"] - row["profiler_flops"])
                 / cold["profiler_flops"] * 100

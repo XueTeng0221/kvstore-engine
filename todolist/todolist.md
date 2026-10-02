@@ -2183,6 +2183,66 @@ Findings: medium `tools/p8_framework_smoke.py:61-65` retains a small ephemeral-p
 Commands: vLLM smoke `vllm_http_ok`; SGLang smoke `sglang_http_ok`; `py_compile`; vLLM focused 16/16; SGLang focused 3/3; smoke `--help`; `git diff --check`; process residue check.
 Residual risks: smoke proves only local framework startup and one HTTP request. External UDS KVStore miss/hit/publication, SGLang external page operations, cancellation/timeout/restart and P8.4 performance remain incomplete. Owner: Agent A; next work requires production UDS listener/adapter wiring and external-cache E2E.
 
+Round 36 remediation (2026-10-02): Agent A. Fixed framework worker import propagation by exporting the repository `python/` path in the smoke runner, corrected vLLM 0.29.0 runtime layout handling for the actual `(num_blocks, 2, block_tokens, flattened_width)` cache tensor, and connected stock SGLang `HiCacheStorageExtraInfo.extra_info` cancellation/deadline checks to v1/v2 batch operations. Added stock-interface cancellation regression. Changed files: tools/p8_framework_smoke.py; python/kvstore_vllm/bridge.py; python/kvstore_vllm/connector.py; python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_vllm_gpu_runtime -v`; real fixture-backed vLLM smoke with absolute `artifacts/models/Qwen2.5-0.5B`, `--uds-path`, one warmup and one measured request; `python3 -m py_compile tools/p8_framework_smoke.py`; `git diff --check`.
+Test result: SGLang stock-interface suite 5/5 passed; vLLM CUDA runtime suite 7/7 passed; real vLLM server reached HTTP and the UDS bridge recorded `lookup` and `publish` operations, but recorded `get_pages=0`, `hit_tokens=0`, and repeated publication digest conflicts. This is not external-hit acceptance evidence. Disk-tier bytes/hit are still unavailable from the framework path and no P8.4 matrix was regenerated. SGLang real UDS-backed framework run remains pending.
+Audit round: 36
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of runtime layout, stock cancellation propagation, and the failed external-hit reproduction.
+Commands: pending independent audit.
+Residual risks: critical real vLLM `get_pages`/non-zero external hit and SGLang stock cancellation through an actual server callback remain unproven; P8.4 disk-hit, disk bytes and complete external benefit evidence remain unproven. Owner: Agent A; next audit requested after this remediation.
+
+Round 37 remediation (2026-10-02): fixed Agent B round 36 findings. vLLM 4D layout detection now rejects the ambiguous two-block shape instead of guessing between block-first and KV-first; SGLang compares `PoolHitPolicy.value` and tests the stock enum; the framework runner now fails external-hit modes without non-zero `get_pages` hits and fails `disk_hit` without disk metrics. Changed files: python/kvstore_vllm/bridge.py; python/kvstore_vllm/connector.py; python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py; tools/p8_framework_smoke.py. Removed generated test bytecode from the worktree.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_vllm/bridge.py python/kvstore_vllm/connector.py python/kvstore_sglang/hicache.py`; `git diff --check`.
+Test result: SGLang stock-interface 5/5 and vLLM adapter/GPU 18/18 passed; Python compilation and whitespace checks passed. Real vLLM external run remains intentionally failed by the new evidence gate because its audit has `get_pages=0`, `hit_tokens=0`, and publication digest conflicts. No disk-tier or SGLang real-server cancellation evidence exists.
+Audit round: 37
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of ambiguous-layout rejection, enum handling, and evidence gates.
+Commands: pending independent audit.
+Residual risks: vLLM external get_pages/non-zero hit, SGLang stock server callback cancellation, disk-hit/disk bytes, and P8.4 external benefit matrix remain blocking.
+
+Round 38 remediation (2026-10-02): exposed `disk_hit` in the smoke runner so the disk evidence gate is reachable; clarified stock SGLang trailing-page semantics and rejected unknown hit policies; added vLLM ambiguous two-block layout rejection and non-ambiguous layout regressions. Changed files: tools/p8_framework_smoke.py; python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py; tests/python/test_vllm_gpu_runtime.py. Generated Python bytecode was removed after validation.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_vllm/bridge.py python/kvstore_vllm/connector.py python/kvstore_sglang/hicache.py`; `git diff --check`.
+Test result: SGLang 5/5 and vLLM 19/19 passed; compilation and diff checks passed. No external-hit or disk-tier acceptance claim.
+Audit round: 38
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit.
+Commands: pending independent audit.
+Residual risks: real vLLM get_pages/non-zero hit, SGLang stock server cancellation propagation, disk-hit/disk bytes, and P8.4 complete external benefit evidence remain unresolved.
+
+Round 39 remediation (2026-10-02): constrained SGLang `TRAILING_PAGES` auxiliary hits by the usable KV hit boundary and made `disk_hit` acceptance require an actual `disk_hit` audit operation. Added a boundary regression and removed generated bytecode after test execution. Changed files: python/kvstore_sglang/hicache.py; tools/p8_framework_smoke.py; tests/python/test_sglang_runtime_real.py; tests/python/__pycache__/*.pyc.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_vllm/bridge.py python/kvstore_vllm/connector.py python/kvstore_sglang/hicache.py`; `git diff --check`.
+Test result: SGLang 5/5 and vLLM 19/19 passed; compilation and diff checks passed. No external vLLM hit, SGLang server cancellation, disk-tier, or P8.4 benefit claim.
+Audit round: 39
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit.
+Commands: pending independent audit.
+Residual risks: real vLLM get_pages/non-zero hit, SGLang stock server cancellation propagation, disk-hit/disk bytes, and complete external benefit evidence remain unresolved.
+
+Round 41 remediation (2026-10-02): made `disk_hit` fail immediately without `--uds-path` audit evidence and added partial trailing auxiliary miss coverage (4 KV pages, 2 auxiliary pages, one missing -> usable boundary 3). Removed generated bytecode after the final focused run. Changed files: tools/p8_framework_smoke.py; tests/python/test_sglang_runtime_real.py; tests/python/__pycache__/*.pyc.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `python3 -m py_compile tools/p8_framework_smoke.py`; `git diff --check`.
+Test result: SGLang 5/5 passed; compilation and whitespace checks passed. vLLM external get_pages/non-zero hit, SGLang real-server cancellation, disk-tier bytes/hit and P8.4 matrix remain unproven.
+Audit round: 41
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking in round 41 remediation.
+Commands: SGLang focused 5/5; vLLM focused 19/19; disk_hit without UDS exited 1; git diff --check; no new bytecode generated.
+Residual risks: vLLM external get_pages/non-zero hit, SGLang real-server cancellation, disk-tier evidence and P8.4 benefit matrix remain unverified. Owner: Agent A; P8.2-P8.4 remain [~].
+
+Round 40 remediation (2026-10-02): corrected `TRAILING_PAGES` to return the usable KV prefix boundary (`kv_hit_pages - missing trailing sidecar pages`) and added a multi-page 4-KV/2-auxiliary regression. Changed files: python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py; generated bytecode removed after validation.
+Commands: `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_vllm/bridge.py python/kvstore_vllm/connector.py python/kvstore_sglang/hicache.py`; `git diff --check`.
+Test result: SGLang 5/5 and vLLM 19/19 passed; compilation and diff checks passed. Real external hit, stock server cancellation, disk tier and P8.4 benefit evidence remain absent.
+Audit round: 40
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit.
+Commands: pending independent audit.
+Residual risks: real vLLM get_pages/non-zero hit, SGLang stock server cancellation propagation, disk-hit/disk bytes, and complete external benefit evidence remain unresolved.
+
 P8.1 UDS bridge implementation (2026-09-14): added `UdsBridge` with versioned Session-owned tenant/model binding, bounded uint32 length framing around existing protobuf request/response bytes, exact read/write handling, per-connection Session lifecycle, disconnect cleanup, path validation, and stop/unlink behavior. Added Python `SessionTransport` with bounded framing, partial read handling, timeout/reconnect cleanup, and fragmented-response tests. `kvstore_integration` builds and Python UDS transport tests pass. This bridge is transport plumbing only; vLLM paged GPU ownership and SGLang runtime registration remain separate tasks.
 Remediation: Python transport now wraps requests and unwraps responses using the `KVP` v1 envelope with explicit big-endian inner payload size and little-endian UDS outer length. C++ bridge handles EINTR, uses `MSG_NOSIGNAL`, and encodes the outer length explicitly little-endian. Python envelope transport test passes; C++ bridge rebuild passes.
 Commands: `cmake --build build --target kvstore_integration -j2`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest discover -s tests/python -v` (10/10); `git diff --check`.
@@ -2390,6 +2450,97 @@ Changed files: python/kvstore_vllm/uds.py; python/kvstore_sglang/hicache.py; too
 Commands: pending focused rerun and independent Agent B round 37.
 Test result: pending.
 
+Round 39 remediation update (2026-10-02): Agent A connected the stock SGLang
+0.5.19 controller termination predicate to `HiCacheStorageExtraInfo` through a
+one-time adapter bridge. The callback is `PrefetchOperation.is_terminated`, not
+an adapter-only event, and a regression toggles the source predicate after
+construction and observes the same callback. The versioned UDS protocol now
+has disk telemetry fields; optional UdsBridge disk configuration opens
+TieredStore, mirrors committed objects, evicts them to disk-only, removes the
+resident registry object, and serves subsequent lookup/GET from disk. Python
+framework audit records preserve disk hit/bytes, network bytes and CPU.
+Changed files: proto/kvstore_integration_v1.proto; python/kvstore_vllm/{protocol.py,bridge.py}; python/kvstore_sglang/hicache.py; tests/python/{test_sglang_runtime_real.py,test_uds_bridge_live.py}; include/kvstore/integration/{protocol.hpp,uds_bridge.hpp}; src/integration/{protocol.cpp,uds_bridge.cpp}; tests/integration/uds_bridge_fixture.cpp; tools/{p8_framework_smoke.py,p8_performance.py,p8_profile_report.py}; docs/p8-performance.md; benchmarks/p8-vllm-external-disk.json; benchmarks/p8-vllm-external-disk.external.jsonl; benchmarks/p8-profiles/vllm-disk/**.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture -j2`; `ctest --test-dir build --output-on-failure -R '^UdsBridgeLive$'`; `cmake --build build --target kvstore_unit_tests kvstore_integration_tests -j2 && ctest --test-dir build --output-on-failure -R '^(UdsBridgeLive|UdsTransport|IntegrationSession\.|IntegrationMockClient|SglangHiCache)'`; `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `python3 -m py_compile ...`; `git diff --check`; real vLLM disk fixture `--runs 10 --warmup 1`.
+Test result: SGLang 8/8; vLLM adapter/GPU 22/22; focused C++/UDS 25/25; UDS disk-tier live test passed; vLLM external disk artifact has 10/10 disk hits, 114032640 disk bytes, 119771740 network bytes and CPU 26.96%. SGLang real disk workload produced publication-only records and no disk read, so no SGLang disk-hit claim. The disk run has no profiler trace and its profiler savings remain null.
+Residual risks: P8.3 still needs a stock SGLang workload that causes prefetch reload and a ten-run external matrix; P8.4 still lacks SGLang disk-hit and disk profiler evidence. Five existing NtyCo full-suite SIGSEGV failures remain outside this round. P8.2-P8.4 remain [~] pending independent Agent B audit.
+
+Audit round: 39
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending independent audit of stock cancellation injection, disk-tier lease/CRC semantics, and benchmark evidence provenance.
+
+Round 39 audit result:
+Audit round: 39
+Auditor: Agent B
+Verdict: fail
+Findings: high `src/integration/protocol.cpp` disk publication was not transactional; high persisted TieredStore objects were not rebuilt into a new bridge MatchIndex; high disk lookup failures returned the resident lookup status; medium stock cancellation installation/lifecycle and low direct callback coverage were incomplete; medium benchmark provenance was incomplete.
+Commands: independent diff audit; Debug C++ build; focused CTest; SGLang 8/8; vLLM 22/22; source inspection.
+Residual risks: Agent A fixed publication cleanup, canonical manifest decode/index reconstruction, disk status propagation, and added restart coverage. Remaining benchmark provenance and stock queue-level cancellation coverage stay registered for the next audit.
+
+Round 40 remediation update (2026-10-02): Agent A added `DecodeCanonicalManifest`, preserves persisted payload digest while rebuilding the disk MatchIndex, rolls back index/registry/tiered publication on post-commit disk failures, and returns disk I/O/corruption status from failed fallback lookup. Added canonical round-trip and UDS disk restart/GET tests. Added a lock around one-time SGLang stock monkey-patch installation. P8.4 artifacts remain honest: vLLM has a ten-run disk-hit artifact; SGLang disk mode remains publication-only and is not claimed as a disk hit.
+Changed files: include/kvstore/kvcache/model.hpp; src/kvcache/{model.cpp,tiered_store.cpp}; include/kvstore/kvcache/tiered_store.hpp; src/integration/{protocol.cpp,uds_bridge.cpp}; tests/unit/kvcache_model_test.cpp; tests/python/test_uds_bridge_live.py; python/kvstore_sglang/hicache.py; todolist/todolist.md.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture kvstore_unit_tests -j2`; `ctest --test-dir build --output-on-failure -R '^(KvCacheModelTest\\.CanonicalManifestRoundTripsForDiskIndexRebuild|UdsBridgeLive)$'`; `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `git diff --check`.
+Test result: canonical round-trip and UDS disk restart live tests passed; previous SGLang 8/8 and vLLM 22/22 remain passing. Independent Agent B round 40 required.
+Residual risks: stock SGLang queue-level cancellation remains tested through the real installed callback class but not a full framework cancellation request; SGLang disk-hit ten-run/profiler evidence remains unavailable because stock workload did not issue prefetch reads; benchmark provenance metadata remains incomplete. P8.2-P8.4 remain [~].
+
+Audit round: 40
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending independent audit of rollback, restart index reconstruction, and SGLang installation synchronization.
+
+Round 40 audit result:
+Audit round: 40
+Auditor: Agent B
+Verdict: fail
+Findings: high `src/kvcache/tiered_store.cpp:1163-1174` ListManifests was unlocked; high corrupt canonical manifests were silently skipped during bridge restart; medium publication rollback ignored cleanup failures; medium `tools/p8_profile_report.py` reported 100% GPU savings when disk profiler traces were absent.
+Commands: independent build/CTest/Python suites; profile report regeneration; diff check.
+Residual risks: fixed in round 41 remediation; independent Agent B round 41 required.
+
+Round 41 remediation update (2026-10-02): Agent A made TieredStore manifest enumeration return a checked Result snapshot under the internal recursive mutex, rejects any canonical decode failure during bridge startup, preserves the persisted payload digest for MatchIndex validation, propagates cleanup failure from disk publication rollback, and emits null GPU activity/savings when no profiler trace exists. Focused C++/UDS tests and report regeneration pass.
+Changed files: include/kvstore/kvcache/tiered_store.hpp; src/kvcache/tiered_store.cpp; src/integration/uds_bridge.cpp; src/integration/protocol.cpp; tools/p8_profile_report.py; tests/python/test_uds_bridge_live.py; todolist/todolist.md.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture kvstore_unit_tests -j2`; `ctest --test-dir build --output-on-failure -R '^(KvCacheModelTest\\.CanonicalManifestRoundTripsForDiskIndexRebuild|UdsBridgeLive|UdsTransport|IntegrationMockClient|SglangHiCache)'`; `python3 -m py_compile tools/p8_profile_report.py python/kvstore_sglang/hicache.py`; `python3 tools/p8_profile_report.py --output /tmp/p8-summary-final.json`; `git diff --check`.
+Test result: focused C++/UDS 6/6; canonical round-trip and disk restart/GET passed; report regenerated with disk profiler savings null; diff check passed.
+Residual risks: stock SGLang full-framework cancellation remains unverified; SGLang disk-hit ten-run/profiler evidence remains unavailable; benchmark provenance metadata remains incomplete. P8.2-P8.4 remain [~].
+
+Audit round: 41
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending independent audit of final round.
+
+Round 41 audit result:
+Audit round: 41
+Auditor: Agent B
+Verdict: fail
+Findings: medium `src/integration/protocol.cpp` treated idempotent `TieredStore::Delete(kNotFound)` during rollback as a cleanup failure and masked the original publication error.
+Commands: independent C++/CTest/Python/profile audit; focused C++/UDS 5/5; SGLang 8/8; profile regeneration; diff check.
+Residual risks: fixed in round 42 remediation; independent Agent B round 42 required.
+
+Round 42 remediation update (2026-10-02): Agent A treats a missing tiered object during rollback as successful idempotent cleanup while still propagating actual cleanup failures. Focused C++/UDS 6/6, SGLang 8/8, profile regeneration and diff check pass.
+Changed files: src/integration/protocol.cpp; todolist/todolist.md.
+Commands: `cmake --build build --target kvstore_uds_bridge_fixture kvstore_unit_tests -j2 && ctest --test-dir build --output-on-failure -R '^(KvCacheModelTest\\.CanonicalManifestRoundTripsForDiskIndexRebuild|UdsBridgeLive|UdsTransport|IntegrationMockClient|SglangHiCache)'`; `PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `python3 tools/p8_profile_report.py --output /tmp/p8-summary-round42.json`; `git diff --check`.
+Test result: focused C++/UDS 6/6; SGLang 8/8; report regenerated with absent profiler counters null; diff check passed.
+Residual risks: stock SGLang full-framework cancellation remains unverified; SGLang disk-hit and complete P8.4 evidence remain unavailable; benchmark provenance remains incomplete. P8.2-P8.4 remain [~].
+
+Audit round: 42
+Auditor: Agent B
+Verdict: pending
+Findings: pending
+Commands: pending
+Residual risks: pending independent audit of final rollback semantics.
+
+Audit round: 42
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking. Rollback treats missing tiered objects/registry/index entries as idempotent cleanup while preserving actual cleanup failures; ListManifests synchronization and corrupt startup propagation pass; report null handling passes.
+Commands: `git diff --check`; `cmake --build build --target kvstore_uds_bridge_fixture kvstore_unit_tests -j2`; focused CTest 5/5; canonical round-trip 1/1; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `python3 tools/p8_profile_report.py --output /tmp/p8-summary-round42-independent.json`; `python3 -m py_compile tools/p8_profile_report.py`.
+Residual risks: P8.3 stock SGLang full-framework cancellation remains unverified; P8.4 lacks SGLang disk-hit/profiler evidence and complete external benefit matrix; vLLM disk evidence is a ten-run artifact without profiler counters; benchmark provenance metadata remains incomplete. Owner: Agent A; follow-up remains in P8.3/P8.4.
+
 Round 41 remediation update (2026-10-02): Agent A derived vLLM bridge geometry
 from the worker tensors at `register_kv_caches`, added support for both the
 Triton flattened `[kv, block, token, hidden]` layout and the block-first
@@ -2419,6 +2570,26 @@ Findings: pending independent re-audit after round 41 findings
 Commands: pending
 Residual risks: same as round 41 until real vLLM probe, stock SGLang cancellation integration, and disk-tier measurements are independently verified.
 
+Round 42 vLLM remediation (2026-10-02): complete-block publication now truncates an unaligned request to full block tokens and matching physical blocks; asynchronous-load return semantics report `True` when external tokens are available; `get_pages` sends block-aligned prefix lengths; the smoke runner disables built-in vLLM prefix caching to force the external load path. Changed files: python/kvstore_vllm/connector.py; python/kvstore_vllm/bridge.py; tests/python/test_runtime_adapters.py; tools/p8_framework_smoke.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; real fixture-backed vLLM run with absolute Qwen2.5-0.5B, UDS path, one warmup and one measured `memory_full_hit` request; `git diff --check`.
+Test result: vLLM focused 20/20 passed. Real UDS audit recorded `publish token_count=464`, then `lookup hit_tokens=464` and `get_pages hit_tokens=464 payload_bytes=5701632`, proving non-zero external lookup/load. HTTP completion timed out after external load, so H2D/request completion and duplicate-publish suppression remain unaccepted.
+Audit round: 42
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of complete-block publication, async-load contract, prefix query and external-load evidence.
+Commands: pending independent audit.
+Residual risks: request completion/H2D synchronization, duplicate publish suppression, SGLang cancellation, disk tier and P8.4 matrix remain unresolved.
+
+Round 43 remediation (2026-10-02): replaced the remaining hardcoded block size in external-load block allocation with the runtime vLLM cache block size and added a block-size-32 regression. Changed files: python/kvstore_vllm/connector.py; tests/python/test_runtime_adapters.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `git diff --check`.
+Test result: vLLM focused 21/21 passed; diff check passed. Real nonzero external lookup/load remains evidenced by round 42, while HTTP completion/H2D synchronization and duplicate publish suppression remain open.
+Audit round: 43
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking in runtime block-size remediation; round 42 evidence remains limited to external lookup/load.
+Commands: vLLM focused 21/21; git diff --check.
+Residual risks: real request completion/H2D synchronization, duplicate publish suppression, SGLang cancellation, disk tier and P8.4 matrix remain unresolved.
+
 Round 43 remediation update (2026-10-02): Agent A fixed the remaining NtyCo
 failure-path leak introduced by the scheduler ownership correction. Coroutine
 initialization failure and a full scheduler registry now call
@@ -2427,6 +2598,96 @@ registry entry before freeing. The five NtyCo regressions remain green.
 Changed files: src/replication/ntyco_bridge.c; todolist/todolist.md
 Commands: `cmake --build build -j2`; `ctest --test-dir build --output-on-failure -R 'AllBackends/ReplicationExecutorConformanceTest.*ntyco|NtycoServerIntegrationTest|ReplicationSocketIntegrationTest.AllExecutorsDriveSocketReplicaApply'`; `python3 -m py_compile python/kvstore_vllm/{uds.py,bridge.py,connector.py} tools/p8_framework_smoke.py`; `git diff --check`
 Test result: NtyCo targeted 5/5 passed; Python compile and diff checks passed. No real vLLM external probe, stock SGLang cancellation integration, or disk-tier performance evidence is claimed.
+
+Round 44 remediation (2026-10-02): made external vLLM loads synchronous with the CUDA event attached before forward, recorded load-side failures, propagated full-hit `skip_save` through scheduler/worker metadata, and made duplicate publication idempotent as `publish_duplicate` on `ALREADY_EXISTS`. Changed files: python/kvstore_vllm/connector.py; python/kvstore_vllm/bridge.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; real fixture-backed vLLM smoke with absolute Qwen2.5-0.5B, UDS, one warmup and one measured `memory_full_hit`; `git diff --check`.
+Test result: focused vLLM 21/21 passed; real smoke returned `vllm_http_ok` with `lookup=2`, `get_pages=1`, `external_hit_tokens=[464]`, `publish=1`, one `publish_duplicate`, and no publish error. Measured latency was 200.64 ms and TTFT 109.22 ms. SGLang stock cancellation, disk-tier hit/bytes and full P8.4 matrix remain open.
+Audit round: 44
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of synchronous load ordering, metadata skip-save propagation and idempotent duplicate publication.
+Commands: pending independent audit.
+Residual risks: SGLang stock cancellation, real disk-tier evidence/disk bytes and ten-run external benefit matrix remain unresolved.
+
+Round 49 remediation (2026-10-02): added SGLang UDS audit-path propagation and adapter audit records for remote page reads/publication; stock external mode now fails closed when no audit file is produced. Corrected even-sample p50 calculation. Changed files: python/kvstore_sglang/hicache.py; tools/p8_framework_smoke.py.
+Commands: `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_sglang/hicache.py`; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `git diff --check`.
+Test result: SGLang focused 5/5 passed; compilation and diff checks passed. Real stock SGLang cancellation and disk-tier evidence remain unproven.
+Audit round: 49
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of SGLang audit propagation and p50 calculation.
+Commands: pending independent audit.
+Residual risks: stock cancellation context, disk-tier hit/bytes and complete SGLang/P8.4 matrix remain unresolved.
+
+Round 52 remediation (2026-10-02): made SGLang audit recording catch all audit-side exceptions, added callable/public lookup audit records, and added a regression proving invalid audit configuration cannot escape the operation. Changed files: python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py.
+Commands: `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_sglang/hicache.py`; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `git diff --check`.
+Test result: SGLang focused 7/7 passed; compilation and diff checks passed. Stock cancellation and disk-tier evidence remain unproven.
+Audit round: 52
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none.
+Commands: SGLang focused 7/7; py_compile; git diff --check.
+Residual risks: stock SGLang cancellation context, disk-tier hit/bytes and complete SGLang/P8.4 matrix remain unverified.
+
+Round 51 remediation (2026-10-02): made SGLang audit writes best-effort with EINTR/zero-write handling so audit failures cannot fail an already committed stock operation; added lookup/get operation records and stricter SGLang external-hit audit validation. Changed files: python/kvstore_sglang/hicache.py; tools/p8_framework_smoke.py.
+Commands: `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_sglang/hicache.py`; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `git diff --check`.
+Test result: SGLang focused 6/6 passed; compilation and diff checks passed. Stock cancellation and disk-tier evidence remain unproven.
+Audit round: 51
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of best-effort audit semantics and operation coverage.
+Commands: pending independent audit.
+Residual risks: stock cancellation context, disk-tier hit/bytes and complete SGLang/P8.4 matrix remain unresolved.
+
+Round 50 remediation (2026-10-02): recorded SGLang public/callable publication in audit logs, hardened audit append with `O_NOFOLLOW` and partial-write handling, and added an audit append regression. Changed files: python/kvstore_sglang/hicache.py; tests/python/test_sglang_runtime_real.py.
+Commands: `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py python/kvstore_sglang/hicache.py`; `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `git diff --check`.
+Test result: SGLang focused 6/6 passed; compilation and diff checks passed. Stock server cancellation and real disk-tier metrics remain unresolved.
+Audit round: 50
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of audit publication and append safety.
+Commands: pending independent audit.
+Residual risks: stock cancellation context, disk-tier hit/bytes and complete SGLang/P8.4 matrix remain unresolved.
+
+Round 48 remediation (2026-10-02): improved stock-framework evidence handling: SGLang external mode now fails with an explicit error when no UDS audit records are produced; smoke results include mean latency, p50 and QPS; vLLM no-UDS cold baseline no longer enters GPU canonicalization without an external transport. Generated ten-run vLLM artifacts: `benchmarks/p8-vllm-external-full.json` and `benchmarks/p8-vllm-external-cold.json`. Changed files: tools/p8_framework_smoke.py; python/kvstore_vllm/connector.py.
+Commands: SGLang UDS smoke probe (failed closed: no external audit records); vLLM external full-hit 1 warmup + 10 measured runs; vLLM cold baseline 1 warmup + 10 measured runs; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `python3 -m py_compile ...`; `git diff --check`.
+Test result: vLLM focused 22/22 passed; full external matrix completed with HTTP success, 10 `get_pages` hits at 464 tokens, mean latency 147.564 ms, p50 141.444 ms, QPS 6.777, CPU 51.92%, network bytes 62,745,440. Cold baseline completed separately. SGLang stock cancellation and disk-tier metrics remain intentionally unaccepted.
+Audit round: 48
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of stock SGLang fail-closed evidence, cold baseline transport isolation, and matrix provenance.
+Commands: pending independent audit.
+Residual risks: SGLang stock cancellation, real disk-tier hit/disk bytes, SGLang ten-run external matrix and profiler-backed CPU/disk/network evidence remain unresolved.
+
+Round 47 remediation (2026-10-02): corrected the worker propagation regression to use a real partial hit (`num_external_tokens=8`) with both `loads` and `saves` metadata; full-hit worker path remains no-publish and partial-hit path publishes. Changed files: tests/python/test_runtime_adapters.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `git diff --check`.
+Test result: vLLM focused 22/22 passed; diff check passed.
+Audit round: 47
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none.
+Commands: vLLM focused 22/22; git diff --check.
+Residual risks: SGLang stock cancellation, real disk-tier evidence/disk bytes and ten-run external benefit matrix remain unresolved.
+
+Round 46 remediation (2026-10-02): added a worker-level scheduler-metadata regression proving full-hit `skip_save=True` results in zero publication calls, while partial-hit `skip_save=False` still publishes. Changed files: tests/python/test_runtime_adapters.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `git diff --check`.
+Test result: vLLM focused 22/22 passed; diff check passed.
+Audit round: 46
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of worker full-hit no-save and partial-hit save behavior.
+Commands: pending independent audit.
+Residual risks: SGLang stock cancellation, real disk-tier evidence/disk bytes and ten-run external benefit matrix remain unresolved.
+
+Round 45 remediation (2026-10-02): `build_connector_meta()` now encodes `_external_full_hits` directly into `_Load.skip_save`, ensuring full-hit state crosses scheduler/worker process boundaries; partial-hit metadata remains save-enabled. Added full-hit and partial-hit propagation regressions. Changed files: python/kvstore_vllm/connector.py; tests/python/test_runtime_adapters.py.
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_runtime_adapters tests.python.test_vllm_gpu_runtime -v`; `git diff --check`.
+Test result: vLLM focused 22/22 passed; diff check passed. Real smoke evidence from round 44 remains `vllm_http_ok`, external hit 464, and idempotent duplicate publication.
+Audit round: 45
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of full-hit metadata propagation and partial-hit save behavior.
+Commands: pending independent audit.
+Residual risks: SGLang stock cancellation, real disk-tier evidence/disk bytes and ten-run external benefit matrix remain unresolved.
 Audit round: 43
 Auditor: Agent B
 Verdict: pending

@@ -26,12 +26,28 @@ field from Chrome traces. GPU activity is summed from profiler kernel, memcpy,
 and memset events and includes decode and external-copy work; it is not presented
 as pure prefill kernel time.
 
-The resident UDS fixture has no disk tier, so no disk-hit number is fabricated.
-Disk-hit performance remains a P8.4 limitation until the production bridge is
-wired to `TieredStore`. CPU percentage and network byte counters are also not
-available from these framework responses. The full-hit throughput gains are
-197.86% for vLLM and 3.41% for SGLang; compute avoidance is represented by the
-profiler-derived FLOPs reductions above, not token hit rate alone.
+The UDS bridge now has an opt-in `TieredStore` disk backend. The ten-run vLLM
+disk-hit artifact is `benchmarks/p8-vllm-external-disk.json` and its raw audit
+records are `benchmarks/p8-vllm-external-disk.external.jsonl`: all ten measured
+requests reported `disk_hit=true`, 114,032,640 disk bytes, and 119,771,740 UDS
+bytes in aggregate. Its mean/p50/p95/p99 latency was 652.737/586.668/1035.623/
+1309.322 ms, QPS 1.532, and process CPU 26.96%. The disk row has no profiler
+trace, so profiler FLOPs savings are intentionally null rather than inferred.
+
+SGLang currently produces publication records but no stock prefetch read in the
+same disk workload; therefore no SGLang disk-hit row is claimed. The stock
+0.5.19 cancellation bridge now forwards `PrefetchOperation.is_terminated` as a
+real callback, but a framework disk-read trace still requires a workload that
+causes the stock prefetch queue to evict/reload pages. Existing SGLang rows
+remain ten-run profiler-backed memory baseline/prefix/full measurements. CPU,
+network, and disk fields are null for those historical records because the
+runner did not receive external audit counters; the report generator preserves
+nulls and never fabricates them.
+
+The full-hit throughput gains are 197.86% for vLLM and 3.41% for SGLang;
+compute avoidance is represented by profiler-derived FLOPs reductions above,
+not token hit rate alone. `tools/p8_profile_report.py` now includes optional
+disk rows and carries CPU/network/disk fields from runner artifacts.
 
 Reproduce each mode with `tools/p8_framework_smoke.py --runs 10 --warmup 1
 --profile-dir ... --output ...`, then regenerate the summary with:

@@ -148,6 +148,84 @@ class RuntimeAdapterTest(unittest.TestCase):
         worker.wait_for_save()
         self.assertEqual(calls, [(tuple(range(16)), {"layer": "value"})])
 
+    def test_scheduler_publication_uses_complete_blocks_only(self):
+        from kvstore_vllm import KVStoreConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True, kv_connector_extra_config={}),
+            cache_config=SimpleNamespace(block_size=16),
+        )
+        scheduler = KVStoreConnector(config, KVConnectorRole.SCHEDULER, None)
+        request = SimpleNamespace(request_id="unaligned", prompt_token_ids=list(range(18)))
+        scheduler.on_new_request(request)
+        scheduler.update_state_after_alloc(request, [3, 4], 0)
+        metadata = scheduler.build_connector_meta(None)
+        self.assertEqual(len(metadata.saves), 1)
+        self.assertEqual(metadata.saves[0].token_ids, tuple(range(16)))
+        self.assertEqual(metadata.saves[0].block_ids, (3,))
+
+    def test_full_external_hit_propagates_skip_save_metadata(self):
+        from kvstore_vllm import KVStoreConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True, kv_connector_extra_config={}),
+            cache_config=SimpleNamespace(block_size=16),
+        )
+        connector = KVStoreConnector(config, KVConnectorRole.SCHEDULER, None)
+        request = SimpleNamespace(request_id="full", prompt_token_ids=list(range(16)))
+        connector.on_new_request(request)
+        connector.update_state_after_alloc(request, [3], 0)
+        connector._external_full_hits.add("full")
+        metadata = connector.build_connector_meta(None)
+        self.assertTrue(metadata.saves[0].skip_save)
+        worker = KVStoreConnector(config, KVConnectorRole.WORKER, None)
+        worker.bind_connector_metadata(
+            type("Metadata", (), {"loads": (), "saves": metadata.saves})())
+        worker.start_load_kv(None)
+        calls = []
+        worker.bind_store(lambda key, payload: calls.append((key, payload)))
+        worker.save_kv_layer_for_request("full", "layer", "value")
+        worker.wait_for_save()
+        self.assertEqual(calls, [])
+
+        connector = KVStoreConnector(config, KVConnectorRole.SCHEDULER, None)
+        connector.on_new_request(request)
+        connector.update_state_after_alloc(request, [3, 4], 8)
+        metadata = connector.build_connector_meta(None)
+        self.assertFalse(metadata.saves[0].skip_save)
+
+        worker = KVStoreConnector(config, KVConnectorRole.WORKER, None)
+        worker.bind_connector_metadata(
+            type("Metadata", (), {"loads": metadata.loads, "saves": metadata.saves})())
+        worker.start_load_kv(None)
+        calls = []
+        worker.bind_store(lambda key, payload: calls.append((key, payload)))
+        worker.save_kv_layer_for_request("full", "layer", "value")
+        worker.wait_for_save()
+        self.assertEqual(calls, [(tuple(range(16)), {"layer": "value"})])
+
+    def test_external_load_uses_runtime_block_size(self):
+        from kvstore_vllm import KVStoreConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_producer=True, kv_connector_extra_config={}),
+            cache_config=SimpleNamespace(block_size=32),
+        )
+        connector = KVStoreConnector(config, KVConnectorRole.WORKER, None)
+        request = SimpleNamespace(request_id="block32", prompt_token_ids=list(range(64)))
+        connector.get_num_new_matched_tokens = lambda request, computed: (64, True)
+        connector._load_plans[request.request_id] = type(
+            "Plan", (), {"generation": 1})()
+        connector.update_state_after_alloc(request, [4, 5, 6], 64)
+        plan = connector._load_plans[request.request_id]
+        self.assertEqual(plan.block_ids, (4, 5))
+
     def _connector_with_calls(self):
         from kvstore_vllm import KVStoreConnector
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole

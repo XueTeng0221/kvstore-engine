@@ -1,0 +1,99 @@
+{
+  "framework": "vllm",
+  "mode": "cold_miss",
+  "runs": 10,
+  "warmup": 1,
+  "samples": [
+    {
+      "latency_ms": 141.23476296663284,
+      "ttft_ms": 65.13536348938942,
+      "tpot_ms": 10.871342782463346,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 84.52599868178368,
+      "ttft_ms": 29.006507247686386,
+      "tpot_ms": 7.931355919156756,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 84.55787971615791,
+      "ttft_ms": 28.603244572877884,
+      "tpot_ms": 7.993519306182861,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 88.1209522485733,
+      "ttft_ms": 27.240902185440063,
+      "tpot_ms": 8.697150009019035,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 83.88223126530647,
+      "ttft_ms": 28.50915491580963,
+      "tpot_ms": 7.910439478499549,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 80.65882697701454,
+      "ttft_ms": 23.90838786959648,
+      "tpot_ms": 8.10720558677401,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 81.84559270739555,
+      "ttft_ms": 26.21358260512352,
+      "tpot_ms": 7.9474300146102905,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 91.06853604316711,
+      "ttft_ms": 27.604449540376663,
+      "tpot_ms": 9.066298071827207,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 84.94830131530762,
+      "ttft_ms": 28.138503432273865,
+      "tpot_ms": 8.115685411861964,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 84.06190201640129,
+      "ttft_ms": 28.902318328619003,
+      "tpot_ms": 7.879940526826041,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": null
+    }
+  ],
+  "uds_path_configured": false,
+  "external_cache_required": false,
+  "profile_dir": null,
+  "latency_ms_mean": 90.49049839377403,
+  "latency_ms_p50": 84.55787971615791,
+  "qps": 11.050883990587042,
+  "cpu_percent": 55.4161031050845,
+  "network_bytes": 0,
+  "disk_bytes": null,
+  "disk_hit": false,
+  "disk_metrics_available": false
+}

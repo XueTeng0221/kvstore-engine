@@ -7,6 +7,9 @@ import threading
 import hashlib
 import math
 import struct
+import json
+import os
+import contextvars
 from dataclasses import dataclass
 
 import torch
@@ -46,12 +49,77 @@ class _CallableEvent:
         return bool(self._callback())
 
 
+_stock_cancellation = contextvars.ContextVar("kvstore_sglang_stock_cancellation", default=None)
+_stock_bridge_installed = False
+_stock_bridge_lock = threading.Lock()
+
+
+def _install_stock_cancellation_bridge():
+    """Preserve stock SGLang's termination predicate in ExtraInfo.
+
+    SGLang 0.5.19 creates ``HiCacheStorageExtraInfo`` without a cancellation
+    field.  Its controller does, however, expose the request-owned
+    ``PrefetchOperation.is_terminated`` predicate.  The small context bridge
+    keeps that predicate attached to the exact ExtraInfo object passed to the
+    backend, including the worker thread where the storage call runs.
+    """
+    global _stock_bridge_installed
+    with _stock_bridge_lock:
+        if _stock_bridge_installed:
+            return
+        _install_stock_cancellation_bridge_locked()
+
+
+def _install_stock_cancellation_bridge_locked():
+    global _stock_bridge_installed
+    try:
+        import sglang.srt.managers.cache_controller as cache_controller
+        import sglang.srt.mem_cache.hybrid_cache.hybrid_cache_controller as hybrid_controller
+    except ImportError:
+        return
+    original_info = cache_controller.HiCacheStorageExtraInfo
+
+    class BoundExtraInfo(original_info):
+        def __init__(self, prefix_keys=None, extra_info=None):
+            values = dict(extra_info or {})
+            terminated = _stock_cancellation.get()
+            if terminated is not None:
+                values.setdefault("cancelled", terminated)
+                values.setdefault("cancel_event", _CallableEvent(terminated))
+            super().__init__(prefix_keys=prefix_keys, extra_info=values or None)
+
+    cache_controller.HiCacheStorageExtraInfo = BoundExtraInfo
+    hybrid_controller.HiCacheStorageExtraInfo = BoundExtraInfo
+
+    def wrap(method):
+        def guarded(self, operation, *args, **kwargs):
+            token = _stock_cancellation.set(operation.is_terminated)
+            try:
+                return method(self, operation, *args, **kwargs)
+            finally:
+                _stock_cancellation.reset(token)
+        return guarded
+
+    cache_controller.HiCacheController._page_transfer = wrap(
+        cache_controller.HiCacheController._page_transfer)
+    cache_controller.HiCacheController._storage_hit_query = wrap(
+        cache_controller.HiCacheController._storage_hit_query)
+    if hasattr(hybrid_controller.HybridCacheController, "_page_transfer"):
+        hybrid_controller.HybridCacheController._page_transfer = wrap(
+            hybrid_controller.HybridCacheController._page_transfer)
+    if hasattr(hybrid_controller.HybridCacheController, "_storage_hit_query"):
+        hybrid_controller.HybridCacheController._storage_hit_query = wrap(
+            hybrid_controller.HybridCacheController._storage_hit_query)
+    _stock_bridge_installed = True
+
+
 class KVStoreHiCacheStorage(HiCacheStorage):
     """Dynamic backend using bounded, cancellation-aware page transport."""
 
     def __init__(self, storage_config=None, factory_kwargs=None, lookup=None,
                  publish=None, release=None, abort=None):
         super().__init__()
+        _install_stock_cancellation_bridge()
         # Preserve the callable fixture API while supporting SGLang's dynamic
         # constructor `(HiCacheStorageConfig, factory_kwargs)`.
         if callable(storage_config) and callable(factory_kwargs):
@@ -64,6 +132,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         self._abort = abort
         self._timeout = float(extra.get("timeout_seconds", 5.0))
         self._namespace = str(extra.get("namespace", "default"))
+        self._audit_path = extra.get("audit_path")
         uds_path = extra.get("uds_path")
         self._session = None
         if uds_path:
@@ -82,6 +151,32 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             self._pages = {}
         self._lock = threading.RLock()
         self._closed = threading.Event()
+
+    def _record(self, operation, **values):
+        if not self._audit_path:
+            return
+        try:
+            if self._session is not None:
+                values.setdefault("network_bytes", self._session.transport.network_bytes)
+            record = json.dumps({"operation": operation, **values}, separators=(",", ":"))
+            descriptor = os.open(self._audit_path,
+                                 os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                                 0o600)
+            try:
+                data = (record + "\n").encode()
+                offset = 0
+                while offset < len(data):
+                    try:
+                        written = os.write(descriptor, data[offset:])
+                    except InterruptedError:
+                        continue
+                    if written <= 0:
+                        return
+                    offset += written
+            finally:
+                os.close(descriptor)
+        except Exception:
+            return
 
     def _key(self, key):
         return f"{self._namespace}:{key}"
@@ -148,6 +243,13 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         return cancel, deadline
 
     @staticmethod
+    def _check_operation(cancel, deadline):
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("SGLang HiCache operation cancelled")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("SGLang HiCache operation deadline exceeded")
+
+    @staticmethod
     def _tensor_bytes(tensor):
         value = tensor.detach().cpu().contiguous()
         return value.view(torch.uint8).numpy().tobytes()
@@ -160,8 +262,11 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         if manifest is None:
             return None
         try:
-            return self._session.lookup(manifest, self._tokens(key), exact=True,
-                                        cancel=cancel, deadline=deadline)
+            response = self._session.lookup(manifest, self._tokens(key), exact=True,
+                                            cancel=cancel, deadline=deadline)
+            self._record("lookup", hit_tokens=response.hit_tokens,
+                         disk_hit=response.disk_hit, disk_bytes=response.disk_bytes)
+            return response
         except SessionError as error:
             if error.response.status in (integration.NOT_FOUND, integration.DEADLINE_EXCEEDED,
                                          integration.CANCELLED):
@@ -184,6 +289,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         cancel, deadline = self._operation_context(extra_info)
         count = 0
         for key in keys:
+            self._check_operation(cancel, deadline)
             if self._session is not None:
                 response = self._remote_lookup(key, cancel=cancel, deadline=deadline)
                 exists = response is not None and response.hit_tokens > 0
@@ -210,6 +316,9 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             if response is None:
                 return None
             payload = self._session.get_chunks(response)
+            self._record("get_pages", hit_tokens=response.hit_tokens,
+                         payload_bytes=len(payload), disk_hit=response.disk_hit,
+                         disk_bytes=response.disk_bytes)
             metadata = self._tensor_meta.get(self._key(key))
             if metadata is None:
                 metadata = (target_location.dtype, tuple(target_location.shape))
@@ -244,6 +353,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             manifest = self._manifest(key, source, payload)
             chunks = integration.payload_chunks(payload, manifest.chunk_bytes)
             response = self._session.publish(manifest, chunks)
+            self._record("publish", payload_bytes=len(payload))
             if response.lease_id:
                 self._session.release(response.lease_id)
             return True
@@ -270,6 +380,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             if cancel is not None and cancel.is_set():
                 result.extend([False] * (len(keys) - i))
                 break
+            self._check_operation(cancel, deadline)
             index = indices[i * stride]
             if self._session is not None and self._manifest(key) is None:
                 target = pool.get_data_page(index)
@@ -279,6 +390,8 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             page = None
             if response is not None:
                 payload = self._session.get_chunks(response, cancel=cancel, deadline=deadline)
+                self._record("get_pages", hit_tokens=response.hit_tokens,
+                             payload_bytes=len(payload))
                 target = pool.get_data_page(index)
                 page = torch.frombuffer(bytearray(payload), dtype=target.dtype).reshape(target.shape).clone()
             elif self._session is None:
@@ -289,15 +402,20 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         return result
 
     def batch_set_v1(self, keys, host_indices, extra_info=None):
-        cancel, _ = self._operation_context(extra_info)
+        cancel, deadline = self._operation_context(extra_info)
         indices = [int(index) for index in host_indices.tolist()]
         pool = self.mem_pool_host
         stride = getattr(pool, "page_size", 1)
         if len(indices) < len(keys) * stride:
             return [False] * len(keys)
-        return [False if cancel is not None and cancel.is_set()
-                else self.set(key, pool.get_data_page(indices[i * stride]))
-                for i, key in enumerate(keys)]
+        result = []
+        for i, key in enumerate(keys):
+            if cancel is not None and cancel.is_set():
+                result.extend([False] * (len(keys) - i))
+                break
+            self._check_operation(cancel, deadline)
+            result.append(self.set(key, pool.get_data_page(indices[i * stride])))
+        return result
 
     def register_mem_pool_host(self, mem_pool_host):
         super().register_mem_pool_host(mem_pool_host)
@@ -306,12 +424,23 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         super().register_mem_host_pool_v2(host_pool, host_pool_name)
 
     def batch_exists_v2(self, keys, pool_transfers=None, extra_info=None):
+        cancel, deadline = self._operation_context(extra_info)
         result = PoolTransferResult(kv_hit_pages=self.batch_exists(keys, extra_info),
                                     extra_pool_hit_pages={})
         for transfer in pool_transfers or ():
             transfer_keys = transfer.keys or []
-            result.extra_pool_hit_pages[str(transfer.name)] = self.batch_exists(
-                transfer_keys, extra_info)
+            self._check_operation(cancel, deadline)
+            hit = self.batch_exists(transfer_keys, extra_info)
+            policy = getattr(transfer, "hit_policy", "all_pages")
+            policy_value = getattr(policy, "value", policy)
+            if policy_value == "trailing_pages":
+                # Stock SGLang passes only the trailing sidecar page list here;
+                # a complete sidecar suffix preserves the whole KV prefix.
+                missing = len(transfer_keys) - hit
+                hit = max(0, result.kv_hit_pages - missing)
+            elif policy_value != "all_pages":
+                raise ValueError(f"unsupported SGLang pool hit policy: {policy_value}")
+            result.extra_pool_hit_pages[str(transfer.name)] = hit
         return result
 
     def batch_get_v2(self, transfers, extra_info=None):
@@ -330,6 +459,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
                 if cancel is not None and cancel.is_set():
                     flags.extend([False] * (len(keys) - i))
                     break
+                self._check_operation(cancel, deadline)
                 if self._session is not None and self._manifest(key) is None:
                     target = pool.get_data_page(indices[i * stride])
                     self._manifest(key, target)
@@ -340,6 +470,9 @@ class KVStoreHiCacheStorage(HiCacheStorage):
                 if response is not None:
                     payload = self._session.get_chunks(response, cancel=cancel,
                                                        deadline=deadline)
+                    self._record("get_pages", hit_tokens=response.hit_tokens,
+                                 payload_bytes=len(payload), disk_hit=response.disk_hit,
+                                 disk_bytes=response.disk_bytes)
                     target = pool.get_data_page(indices[i * stride])
                     page = torch.frombuffer(bytearray(payload), dtype=target.dtype).reshape(target.shape).clone()
                 elif self._session is None:
@@ -351,7 +484,7 @@ class KVStoreHiCacheStorage(HiCacheStorage):
         return result
 
     def batch_set_v2(self, transfers, extra_info=None):
-        cancel, _ = self._operation_context(extra_info)
+        cancel, deadline = self._operation_context(extra_info)
         result = {}
         for transfer in transfers:
             keys = transfer.keys or []
@@ -361,11 +494,14 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             if len(indices) < len(keys) * stride:
                 result[transfer.name] = [False] * len(keys)
             else:
-                result[transfer.name] = [
-                    False if cancel is not None and cancel.is_set()
-                    else self.set(key, pool.get_data_page(indices[i * stride]))
-                    for i, key in enumerate(keys)
-                ]
+                flags = []
+                for i, key in enumerate(keys):
+                    if cancel is not None and cancel.is_set():
+                        flags.extend([False] * (len(keys) - i))
+                        break
+                    self._check_operation(cancel, deadline)
+                    flags.append(self.set(key, pool.get_data_page(indices[i * stride])))
+                result[transfer.name] = flags
         return result
 
     def close(self):
@@ -393,6 +529,8 @@ class KVStoreHiCacheStorage(HiCacheStorage):
             # page-oriented HiCache calls use exists/get above.
             return {"status": "not_found", "hit_tokens": 0}
         result = self._lookup(tuple(token_ids), exact, deadline)
+        self._record("lookup", hit_tokens=(result.get("hit_tokens", 0)
+                                            if isinstance(result, dict) else 0))
         if deadline is not None and time.monotonic() >= deadline:
             lease_id = result.get("lease_id") if isinstance(result, dict) else None
             if lease_id is not None:
@@ -406,9 +544,13 @@ class KVStoreHiCacheStorage(HiCacheStorage):
                 raise RuntimeError("sidecar publication transport is not configured")
             if isinstance(manifest, dict):
                 manifest = integration.TensorManifest(**manifest)
-            return self._session.publish(manifest, chunks)
+            response = self._session.publish(manifest, chunks)
+            self._record("publish", payload_bytes=manifest.payload_bytes)
+            return response
         try:
-            return self._publish(manifest, tuple(chunks))
+            result = self._publish(manifest, tuple(chunks))
+            self._record("publish")
+            return result
         except BaseException:
             if self._abort is not None:
                 self._abort(manifest.get("reservation_id", 0))

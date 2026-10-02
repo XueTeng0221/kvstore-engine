@@ -105,6 +105,17 @@ class VllmGpuRuntimeTest(unittest.TestCase):
             self.assertTrue(torch.equal(tensor[:, 1].cpu(), expected[:, 1]))
         connector.shutdown()
 
+    def test_ambiguous_four_dimensional_layout_is_rejected(self):
+        from kvstore_vllm.bridge import _Geometry, VllmSessionBridge
+
+        bridge = VllmSessionBridge(
+            SimpleNamespace(tenant_id="t", model_id="m"),
+            _Geometry(("layer.0",), 16, 2, 64, 2, 2), {})
+        with self.assertRaises(ValueError):
+            bridge.configure_runtime_geometry(("layer.0",), (2, 2, 16, 128))
+        bridge.configure_runtime_geometry(("layer.0",), (3, 2, 16, 128))
+        bridge.configure_runtime_geometry(("layer.0",), (2, 3, 16, 128))
+
     def test_runtime_layer_count_is_not_model_hardcoded(self):
         import torch
 
