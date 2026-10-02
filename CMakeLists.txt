@@ -105,18 +105,25 @@ if(KVSTORE_ENABLE_NTYCO AND UNIX)
     endif()
   endif()
   if(NOT EXISTS "${NTYCO_WAKEUP_MARKER}")
-    foreach(ntyco_patch IN ITEMS ntyco_scheduler_cancel.patch)
+    file(READ "${ntyco_SOURCE_DIR}/core/nty_schedule.c" ntyco_scheduler_source)
+    string(REPLACE "\n\tnty_schedule_free(sched);\n\t\n\treturn ;" "\n\t\n\treturn ;" ntyco_scheduler_source "${ntyco_scheduler_source}")
+    file(WRITE "${ntyco_SOURCE_DIR}/core/nty_schedule.c" "${ntyco_scheduler_source}")
+    string(FIND "${ntyco_scheduler_source}" "nty_schedule_cancel_all" ntyco_already_patched)
+    string(FIND "${ntyco_scheduler_source}" "\n\tnty_schedule_free(sched);\n\t\n\treturn ;" ntyco_scheduler_owns_free)
+    if(ntyco_already_patched GREATER -1 AND ntyco_scheduler_owns_free EQUAL -1)
+      file(WRITE "${NTYCO_WAKEUP_MARKER}" "kvstore scheduler wakeup patch applied\n")
+    else()
       execute_process(
-        COMMAND patch -N -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/${ntyco_patch}"
+        COMMAND patch -N -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ntyco_scheduler_cancel.patch"
         WORKING_DIRECTORY "${ntyco_SOURCE_DIR}"
         RESULT_VARIABLE ntyco_patch_result
         OUTPUT_VARIABLE ntyco_patch_output
         ERROR_VARIABLE ntyco_patch_error)
       if(NOT ntyco_patch_result EQUAL 0)
-        message(FATAL_ERROR "failed to patch pinned NtyCo scheduler (${ntyco_patch}): ${ntyco_patch_output}${ntyco_patch_error}")
+        message(FATAL_ERROR "failed to patch pinned NtyCo scheduler: ${ntyco_patch_output}${ntyco_patch_error}")
       endif()
-    endforeach()
-    file(WRITE "${NTYCO_WAKEUP_MARKER}" "kvstore scheduler wakeup patch applied\n")
+      file(WRITE "${NTYCO_WAKEUP_MARKER}" "kvstore scheduler wakeup patch applied\n")
+    endif()
   endif()
   add_library(ntyco_runtime STATIC
     ${ntyco_SOURCE_DIR}/core/nty_coroutine.c

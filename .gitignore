@@ -8,4 +8,4 @@ Testing/
 *.profdata
 artifacts/*
 .codemap/
-__pycache__/
+**/__pycache__/

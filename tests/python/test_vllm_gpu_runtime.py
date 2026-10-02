@@ -65,11 +65,44 @@ class VllmGpuRuntimeTest(unittest.TestCase):
             connector.wait_for_layer_load(name)
         torch.cuda.current_stream().synchronize()
         for layer, tensor in enumerate(caches.values()):
-            self.assertTrue(torch.equal(tensor[3].cpu(), pages[f"layer.{layer}"][0]))
-            self.assertTrue(torch.equal(tensor[1].cpu(), pages[f"layer.{layer}"][1]))
+            self.assertTrue(torch.equal(tensor[3].cpu(), pages[f"layer.{layer}"][:, 0]))
+            self.assertTrue(torch.equal(tensor[1].cpu(), pages[f"layer.{layer}"][:, 1]))
             self.assertEqual(torch.count_nonzero(tensor[0]).item(), 0)
         connector.cancel("load")
         self.assertEqual(transport.cancelled, ["load"])
+        connector.shutdown()
+
+    def test_triton_flattened_layout_round_trip(self):
+        import torch
+        from kvstore_vllm.connector import _Load, _Metadata
+
+        geometry = SimpleNamespace(block_tokens=16, num_kv_heads=2, head_size=64)
+        connector = self._connector()
+        connector.bind_transport(SimpleNamespace(geometry=geometry))
+        caches = {
+            f"layer.{layer}": torch.zeros(
+                (2, 4, 16, 128), device="cuda", dtype=torch.bfloat16)
+            for layer in range(2)
+        }
+        connector.register_kv_caches(caches)
+        pages = {
+            name: torch.full((2, 2, 16, 2, 64), layer + 1,
+                             dtype=torch.bfloat16, pin_memory=True)
+            for layer, name in enumerate(caches)
+        }
+        transport = _Transport(pages)
+        transport.geometry = geometry
+        connector.bind_transport(transport)
+        connector.bind_connector_metadata(
+            _Metadata((_Load("flat", 32, (3, 1), 1),)))
+        connector.start_load_kv(None)
+        for name in caches:
+            connector.wait_for_layer_load(name)
+        torch.cuda.current_stream().synchronize()
+        for layer, tensor in enumerate(caches.values()):
+            expected = pages[f"layer.{layer}"].flatten(3)
+            self.assertTrue(torch.equal(tensor[:, 3].cpu(), expected[:, 0]))
+            self.assertTrue(torch.equal(tensor[:, 1].cpu(), expected[:, 1]))
         connector.shutdown()
 
     def test_runtime_layer_count_is_not_model_hardcoded(self):

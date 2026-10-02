@@ -50,9 +50,33 @@ class VllmSessionBridge:
         self._cancel: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
+    @property
+    def geometry(self) -> _Geometry:
+        return self._geometry
+
+    def configure_runtime_geometry(self, layer_names, tensor_shape) -> None:
+        """Replace model-spec guesses with the worker's allocated page layout."""
+        shape = tuple(int(value) for value in tensor_shape)
+        if len(shape) == 5 and shape[1] == 2:
+            block_tokens, num_kv_heads, head_size = shape[2:]
+        elif len(shape) == 4 and shape[0] == 2:
+            block_tokens = shape[2]
+            if self._geometry.num_kv_heads <= 0 or self._geometry.head_size <= 0:
+                raise ValueError("flattened runtime KV layout needs configured head geometry")
+            num_kv_heads, head_size = self._geometry.num_kv_heads, self._geometry.head_size
+            if shape[3] != num_kv_heads * head_size:
+                raise ValueError("flattened runtime KV width does not match head geometry")
+        else:
+            raise ValueError(f"unsupported runtime KV cache shape: {shape}")
+        self._geometry = _Geometry(
+            tuple(str(name) for name in layer_names), block_tokens,
+            num_kv_heads, head_size, self._geometry.dtype,
+            self._geometry.element_bytes)
+
     def _record(self, operation: str, **values) -> None:
         if not self._audit_path:
             return
+        values.setdefault("network_bytes", self._session.transport.network_bytes)
         record = json.dumps({"operation": operation, **values}, separators=(",", ":"))
         descriptor = os.open(self._audit_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
@@ -161,7 +185,7 @@ class VllmSessionBridge:
             value = torch.frombuffer(bytearray(payload), dtype={
                 1: torch.float16, 2: torch.bfloat16, 3: torch.float32,
             }[manifest.dtype]).reshape(shape)
-            return {name: value[index].permute(1, 0, 2, 3, 4).clone().pin_memory()
+            return {name: value[index].clone().pin_memory()
                     for index, name in enumerate(self._geometry.layer_names)}
         finally:
             with self._lock:
@@ -177,10 +201,15 @@ class VllmSessionBridge:
             tensor = pages[name]
             if not isinstance(tensor, torch.Tensor):
                 raise ValueError("publication layer is not a tensor")
+            expected = (2, math.ceil(len(tokens) / self._geometry.block_tokens),
+                        self._geometry.block_tokens, self._geometry.num_kv_heads,
+                        self._geometry.head_size)
+            if tuple(tensor.shape) != expected:
+                raise ValueError(
+                    f"publication tensor geometry for {name} is {tuple(tensor.shape)}, "
+                    f"expected {expected}")
             ordered.append(tensor.detach().cpu().contiguous())
-        # vLLM callbacks expose [blocks, kv, tokens, heads, dim]; P8.1 stores
-        # the canonical planar order [kv, blocks, tokens, heads, dim].
-        canonical = torch.stack(ordered).permute(0, 2, 1, 3, 4, 5).contiguous()
+        canonical = torch.stack(ordered).contiguous()
         payload = canonical.view(torch.uint8).numpy().tobytes()
         manifest = self._manifest(tokens, hashlib.sha256(payload).digest())
         if len(payload) != manifest.payload_bytes:

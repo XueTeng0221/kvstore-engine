@@ -2390,6 +2390,66 @@ Changed files: python/kvstore_vllm/uds.py; python/kvstore_sglang/hicache.py; too
 Commands: pending focused rerun and independent Agent B round 37.
 Test result: pending.
 
+Round 41 remediation update (2026-10-02): Agent A derived vLLM bridge geometry
+from the worker tensors at `register_kv_caches`, added support for both the
+Triton flattened `[kv, block, token, hidden]` layout and the block-first
+`[block, kv, token, head, dim]` layout, and delayed publication until all
+runtime layers have arrived. The five NtyCo full-suite crashes had a separate
+root cause: `nty_schedule_run()` already frees its scheduler and
+`kvstore_ntyco_run()` freed it a second time. The duplicate free was removed;
+the focused full-suite failures now pass. UDS transport now exposes measured
+network bytes and the smoke result records CPU/disk/network fields, but a
+resident-only bridge still cannot produce real disk-hit bytes.
+Changed files: python/kvstore_vllm/{bridge.py,connector.py,uds.py};
+tests/python/test_vllm_gpu_runtime.py; tools/p8_framework_smoke.py;
+src/replication/{executor.cpp,ntyco_bridge.c}; todolist/todolist.md
+Commands: `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_vllm_gpu_runtime tests.python.test_runtime_adapters -v`; `PYTHONPATH=python .venv-vllm/bin/python -m unittest tests.python.test_uds_session tests.python.test_uds_transport tests.python.test_runtime_adapters -v`; `cmake --build build -j2`; `ctest --test-dir build --output-on-failure -R 'AllBackends/ReplicationExecutorConformanceTest.*ntyco|NtycoServerIntegrationTest|ReplicationSocketIntegrationTest.AllExecutorsDriveSocketReplicaApply'`; `python3 -m py_compile ...`; `git diff --check`
+Test result: vLLM GPU/runtime 18/18 passed; UDS/runtime Python 21/21 passed; all five previously failing NtyCo tests passed. Real vLLM external publish/get_pages/hit probe has not yet been rerun after the geometry fix. Stock SGLang cancellation remains unconnected because SGLang 0.5.19 constructs `HiCacheStorageExtraInfo` with prefix keys only and does not pass `PrefetchOperation` cancellation into backend calls. Disk-tier evidence remains unavailable.
+Audit round: 41
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of geometry mapping, publication readiness, NtyCo scheduler ownership, and metric provenance
+Commands: pending
+Residual risks: P8.2 real external publication/load; P8.3 stock cancellation propagation; P8.4 real disk-hit and profiler-backed CPU/disk/network evidence remain open. No completion claim.
+
+Audit round: 42
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent re-audit after round 41 findings
+Commands: pending
+Residual risks: same as round 41 until real vLLM probe, stock SGLang cancellation integration, and disk-tier measurements are independently verified.
+
+Round 43 remediation update (2026-10-02): Agent A fixed the remaining NtyCo
+failure-path leak introduced by the scheduler ownership correction. Coroutine
+initialization failure and a full scheduler registry now call
+`nty_schedule_free` directly; normal scheduler shutdown still removes the
+registry entry before freeing. The five NtyCo regressions remain green.
+Changed files: src/replication/ntyco_bridge.c; todolist/todolist.md
+Commands: `cmake --build build -j2`; `ctest --test-dir build --output-on-failure -R 'AllBackends/ReplicationExecutorConformanceTest.*ntyco|NtycoServerIntegrationTest|ReplicationSocketIntegrationTest.AllExecutorsDriveSocketReplicaApply'`; `python3 -m py_compile python/kvstore_vllm/{uds.py,bridge.py,connector.py} tools/p8_framework_smoke.py`; `git diff --check`
+Test result: NtyCo targeted 5/5 passed; Python compile and diff checks passed. No real vLLM external probe, stock SGLang cancellation integration, or disk-tier performance evidence is claimed.
+Audit round: 43
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent re-audit of NtyCo failure cleanup
+Commands: pending
+Residual risks: P8.2 real external publication/load; P8.3 stock cancellation; P8.4 disk-hit and profiler-backed disk/network/CPU evidence remain hard blockers.
+
+Round 44 remediation update (2026-10-02): Agent A freed the bootstrap
+coroutine and its allocated stack on the NtyCo registry-full failure path
+before freeing the scheduler. Normal shutdown, init failure, and registry-full
+ownership paths are now distinct and bounded. Targeted NtyCo regressions remain
+green. Real framework and disk-tier blockers remain intentionally open.
+Changed files: src/replication/ntyco_bridge.c; todolist/todolist.md
+Commands: `cmake --build build -j2`; `ctest --test-dir build --output-on-failure -R 'AllBackends/ReplicationExecutorConformanceTest.*ntyco|NtycoServerIntegrationTest|ReplicationSocketIntegrationTest.AllExecutorsDriveSocketReplicaApply'`; `git diff --check`; `python3 -m py_compile python/kvstore_vllm/{uds.py,bridge.py,connector.py} tools/p8_framework_smoke.py`
+Test result: targeted NtyCo 5/5 passed; compile and whitespace checks passed. No P8.2-P8.4 completion claim.
+Audit round: 44
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking; NtyCo bootstrap coroutine, scheduler, poller and eventfd ownership are safe in reviewed paths
+Commands: `cmake --build build -j2`; `ctest --test-dir build --output-on-failure -R 'AllBackends/ReplicationExecutorConformanceTest.*ntyco|NtycoServerIntegrationTest|ReplicationSocketIntegrationTest.AllExecutorsDriveSocketReplicaApply'`; `ctest --test-dir build --output-on-failure -R '^(UdsBridgeLive|UdsTransport|IntegrationMockClient|VllmGpuRuntime)$'`; `python3 -m py_compile python/kvstore_vllm/{uds.py,bridge.py,connector.py} tools/p8_framework_smoke.py`; `git diff --check`
+Test result: targeted NtyCo 5/5 passed; UDS/runtime focused suite passed; Python compile and whitespace checks passed.
+Residual risks: P8.2 real external vLLM publication/load/hit; P8.3 stock SGLang cancellation; P8.4 disk-hit and profiler-backed CPU/disk/network evidence.
+
 Audit round: 39
 Auditor: Agent B
 Verdict: fail

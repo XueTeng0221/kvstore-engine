@@ -30,7 +30,7 @@ int kvstore_ntyco_init(unsigned long stack_bytes) {
   if (nty_coroutine_create(&coroutine, kvstore_ntyco_bootstrap, 0) != 0) {
     nty_schedule *failed_schedule = nty_coroutine_get_sched();
     const int failed_eventfd = failed_schedule == 0 ? -1 : failed_schedule->eventfd;
-    if (failed_schedule != 0) nty_schedule_run();
+    if (failed_schedule != 0) nty_schedule_free(failed_schedule);
     if (failed_eventfd >= 0) (void)syscall(SYS_close, failed_eventfd);
     free(requested_stack);
     return -1;
@@ -48,7 +48,8 @@ int kvstore_ntyco_init(unsigned long stack_bytes) {
   if (kvstore_ntyco_eventfd_count >= 16) {
     pthread_mutex_unlock(&kvstore_ntyco_eventfds_mutex);
     const int eventfd = schedule->eventfd;
-    nty_schedule_run();
+    nty_coroutine_free(coroutine);
+    nty_schedule_free(schedule);
     if (eventfd >= 0) (void)syscall(SYS_close, eventfd);
     return -1;
   }
@@ -72,6 +73,8 @@ void kvstore_ntyco_run(void) {
       break;
     }
   }
+  // The scheduler patch leaves ownership here. Remove it from the wakeup
+  // registry before freeing it so Stop/cancel cannot dereference stale state.
   nty_schedule_free(schedule);
   (void)syscall(SYS_close, eventfd);
   pthread_mutex_unlock(&kvstore_ntyco_eventfds_mutex);

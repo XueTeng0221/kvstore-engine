@@ -110,6 +110,15 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def child_cpu_seconds(pid: int) -> float | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split()
+        ticks = os.sysconf("SC_CLK_TCK")
+        return (int(fields[13]) + int(fields[14])) / ticks
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--framework", choices=("vllm", "sglang"), required=True)
@@ -246,6 +255,7 @@ def main() -> int:
         bufsize=1,
     )
     output: queue.Queue[str] = queue.Queue()
+    process_started = time.monotonic()
 
     def collect_output() -> None:
         assert process.stdout is not None
@@ -325,7 +335,11 @@ def main() -> int:
                   "runs": args.runs, "warmup": args.warmup, "samples": rows,
                   "uds_path_configured": bool(args.uds_path),
                   "external_cache_required": bool(args.uds_path),
-                  "profile_dir": str(args.profile_dir.resolve()) if args.profile_dir else None}
+                   "profile_dir": str(args.profile_dir.resolve()) if args.profile_dir else None}
+        cpu_seconds = child_cpu_seconds(process.pid)
+        result["cpu_percent"] = (
+            cpu_seconds / max(1e-9, time.monotonic() - process_started) * 100.0
+            if cpu_seconds is not None else None)
         if audit_path:
             records = [json.loads(line) for line in audit_path.read_text().splitlines()]
             result["external_operations"] = {
@@ -336,6 +350,22 @@ def main() -> int:
                 record["hit_tokens"] for record in records
                 if record["operation"] == "get_pages"
             ]
+            result["network_bytes"] = max(
+                (record.get("network_bytes", 0) for record in records), default=0)
+            result["disk_bytes"] = (sum(record["disk_bytes"] for record in records
+                                         if isinstance(record.get("disk_bytes"), (int, float)))
+                                    if any("disk_bytes" in record for record in records)
+                                    else None)
+            result["disk_hit"] = any(
+                record.get("operation") == "disk_hit" for record in records)
+            result["disk_metrics_available"] = any(
+                record.get("operation") == "disk_hit" or "disk_bytes" in record
+                for record in records)
+        else:
+            result["network_bytes"] = 0
+            result["disk_bytes"] = None
+            result["disk_hit"] = False
+            result["disk_metrics_available"] = False
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2) + "\n")

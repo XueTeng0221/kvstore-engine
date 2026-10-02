@@ -137,10 +137,64 @@ class KVStoreConnector(KVConnectorBase_V1):
         if any(tensor.ndim < 2 or any(size <= 0 for size in tensor.shape)
                for tensor in kv_caches.values()):
             raise ValueError("invalid paged KV cache shape")
+        if self._transport is not None and hasattr(self._transport, "configure_runtime_geometry"):
+            first = next(iter(kv_caches.values()))
+            self._transport.configure_runtime_geometry(tuple(kv_caches), first.shape)
+        if self._transport is not None:
+            for layer_name, tensor in kv_caches.items():
+                self._validate_cache_layout(layer_name, tensor)
         first = next(iter(kv_caches.values()))
         self._kv_caches = dict(kv_caches)
         self._load_stream = torch.cuda.Stream(device=first.device, priority=1)
         self._save_stream = torch.cuda.Stream(device=first.device, priority=1)
+
+    def _validate_cache_layout(self, layer_name: str, tensor) -> None:
+        geometry = getattr(self._transport, "geometry", None)
+        block_tokens = int(getattr(geometry, "block_tokens", 0) or
+                           getattr(getattr(self._vllm_config, "cache_config", None),
+                                   "block_size", 16))
+        num_heads = int(getattr(geometry, "num_kv_heads", 0))
+        head_size = int(getattr(geometry, "head_size", 0))
+        shape = tuple(int(value) for value in tensor.shape)
+        block_first = (len(shape) == 5 and shape[1] == 2 and
+                       shape[2] == block_tokens and
+                       (not num_heads or shape[3] == num_heads) and
+                       (not head_size or shape[4] == head_size))
+        kv_first = (len(shape) == 4 and shape[0] == 2 and
+                    shape[2] == block_tokens and
+                    (not num_heads or not head_size or
+                     shape[3] == num_heads * head_size))
+        if not block_first and not kv_first:
+            raise ValueError(
+                f"unsupported KV cache layout for {layer_name}: shape={shape}")
+
+    def _canonical_pages(self, layer_name: str, tensor, block_ids):
+        import torch
+        self._validate_cache_layout(layer_name, tensor)
+        ids = torch.as_tensor(block_ids, device=tensor.device, dtype=torch.long)
+        geometry = getattr(self._transport, "geometry", None)
+        num_heads = int(getattr(geometry, "num_kv_heads", 0))
+        head_size = int(getattr(geometry, "head_size", 0))
+        if tensor.ndim == 5:
+            selected = tensor.index_select(0, ids).permute(1, 0, 2, 3, 4)
+        else:
+            selected = tensor.index_select(1, ids)
+            if not num_heads or not head_size:
+                raise ValueError("flattened KV cache layout requires runtime head geometry")
+            selected = selected.reshape(
+                2, ids.numel(), tensor.shape[2], num_heads, head_size)
+        return selected.contiguous()
+
+    def _inject_pages(self, layer_name: str, destination, block_ids, source) -> None:
+        import torch
+        self._validate_cache_layout(layer_name, destination)
+        ids = torch.as_tensor(block_ids, device=destination.device, dtype=torch.long)
+        source = source.to(device=destination.device, dtype=destination.dtype,
+                           non_blocking=True)
+        if destination.ndim == 5:
+            destination.index_copy_(0, ids, source.permute(1, 0, 2, 3, 4))
+        else:
+            destination.index_copy_(1, ids, source.flatten(3))
 
     def bind_gpu_block_pool(self, gpu_block_pool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -238,11 +292,9 @@ class KVStoreConnector(KVConnectorBase_V1):
                     source = pages[layer_name]
                     if source.device.type != "cpu":
                         source = source.cpu()
-                    source = source.to(device=destination.device, dtype=destination.dtype, non_blocking=True)
-                    ids = torch.as_tensor(plan.block_ids, device=destination.device, dtype=torch.long)
-                    if source.shape[0] != ids.numel():
+                    if source.ndim != 5 or source.shape[0] != 2 or source.shape[1] != len(plan.block_ids):
                         raise ValueError("source page count does not match destination blocks")
-                    destination.index_copy_(0, ids, source)
+                    self._inject_pages(layer_name, destination, plan.block_ids, source)
                     event = torch.cuda.Event()
                     event.record(self._load_stream)
                     events[layer_name] = (event,)
@@ -272,9 +324,8 @@ class KVStoreConnector(KVConnectorBase_V1):
             return
         import torch
         compute_stream = torch.cuda.current_stream(device=kv_layer.device)
-        selected = kv_layer.index_select(
-            0, torch.as_tensor(self._save_blocks(request_id), device=kv_layer.device)
-        )
+        selected = self._canonical_pages(
+            layer_name, kv_layer, self._save_blocks(request_id))
         staging = torch.empty_like(selected, device="cpu", pin_memory=True)
         with torch.cuda.stream(self._save_stream):
             done = torch.cuda.Event()
@@ -335,7 +386,8 @@ class KVStoreConnector(KVConnectorBase_V1):
                 pending = list(self._pending.items())
             candidate = next(
                 ((request_id, key) for request_id, key in pending
-                 if request_id not in self._saving and request_id not in attempted), None
+                 if request_id not in self._saving and request_id not in attempted and
+                 self._publication_ready(request_id)), None
             )
             if candidate is None:
                 break
@@ -377,6 +429,12 @@ class KVStoreConnector(KVConnectorBase_V1):
                         self._pending.pop(request_id, None)
                     self._saving.discard(request_id)
         return errors
+
+    def _publication_ready(self, request_id: str) -> bool:
+        save = self._load.get(request_id)
+        if save is None or not isinstance(save.payload, dict):
+            return False
+        return not self._kv_caches or set(save.payload) == set(self._kv_caches)
 
     def request_finished(self, request, block_ids) -> tuple[bool, dict[str, Any] | None]:
         request_blocks = self._ids(block_ids)

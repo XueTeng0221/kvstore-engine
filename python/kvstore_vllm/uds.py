@@ -26,11 +26,18 @@ class SessionTransport:
         self._exchange_lock = threading.Lock()
         self._cancelled = threading.Event()
         self._generation = 0
+        self._bytes_sent = 0
+        self._bytes_received = 0
 
     @property
     def generation(self) -> int:
         with self._state_lock:
             return self._generation
+
+    @property
+    def network_bytes(self) -> int:
+        with self._state_lock:
+            return self._bytes_sent + self._bytes_received
 
     def connect(self) -> None:
         if "\x00" in self.path:
@@ -118,7 +125,10 @@ class SessionTransport:
             if sock is None:
                 raise InterruptedError("transport closed")
             try:
-                offset += sock.send(data[offset:])
+                sent = sock.send(data[offset:])
+                offset += sent
+                with self._state_lock:
+                    self._bytes_sent += sent
             except socket.timeout:
                 continue
 
@@ -137,6 +147,8 @@ class SessionTransport:
             if not chunk:
                 raise ConnectionError("UDS bridge closed")
             result.extend(chunk)
+            with self._state_lock:
+                self._bytes_received += len(chunk)
         return bytes(result)
 
 

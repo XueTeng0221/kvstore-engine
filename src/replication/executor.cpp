@@ -18,6 +18,7 @@
 #ifdef KVSTORE_HAVE_NTYCO
 extern "C" {
 int kvstore_ntyco_spawn(void (*callback)(void*), void* argument);
+int kvstore_ntyco_init(unsigned long stack_bytes);
 void kvstore_ntyco_run();
 void kvstore_ntyco_set_timeout(unsigned long usecs);
 }
@@ -242,6 +243,20 @@ class NtycoReplicationExecutor::Impl {
 #endif
   void Run() noexcept {
 #ifdef KVSTORE_HAVE_NTYCO
+    if (kvstore_ntyco_init(128U * 1024U) != 0) {
+      std::deque<std::function<void()>> rejected;
+      {
+        std::scoped_lock lock(mutex_);
+        stopping_ = true;
+        rejected.swap(tasks_);
+      }
+      for (auto& task : rejected) {
+        RunTask(task);
+        std::scoped_lock lock(mutex_);
+        --pending_;
+      }
+      return;
+    }
     for (;;) {
       std::deque<std::function<void()>> batch;
       {
