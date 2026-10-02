@@ -73,6 +73,7 @@ class KVStoreConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config, role, kv_cache_config):
         super().__init__(vllm_config, role, kv_cache_config)
+        self._kv_cache_config = kv_cache_config
         self._entries: dict[tuple[int, ...], _Entry] = {}
         self._pending: dict[str, tuple[int, ...]] = {}
         self._load: dict[str, _Save] = {}
@@ -85,6 +86,7 @@ class KVStoreConnector(KVConnectorBase_V1):
         self._finished: set[str] = set()
         self._kv_caches: dict[str, Any] = {}
         self._load_plans: dict[str, _Load] = {}
+        self._save_plans: dict[str, _Load] = {}
         self._load_events: dict[str, dict[str, Any]] = {}
         self._transfers: dict[tuple[str, int], _Transfer] = {}
         self._load_errors: set[int] = set()
@@ -98,6 +100,11 @@ class KVStoreConnector(KVConnectorBase_V1):
         factory = extra.get("transport_factory")
         if callable(factory):
             self._transport = factory(extra)
+        elif extra.get("uds_path"):
+            from .bridge import VllmSessionBridge
+            self._transport = VllmSessionBridge.from_vllm_config(
+                vllm_config, kv_cache_config, extra)
+            self._put = self._transport.publish
 
     @staticmethod
     def requires_piecewise_for_cudagraph(extra_config: dict[str, Any]) -> bool:
@@ -108,19 +115,30 @@ class KVStoreConnector(KVConnectorBase_V1):
         """Register the worker's real paged tensors and their CUDA streams."""
         if not kv_caches:
             raise ValueError("vLLM supplied no KV cache tensors")
-        if len(kv_caches) != 24:
-            raise ValueError("Qwen2.5-0.5B requires exactly 24 KV cache layers")
-        devices = {str(t.device) for t in kv_caches.values()}
+        config = self._kv_cache_config
+        expected = {
+            layer_name
+            for group in getattr(config, "kv_cache_groups", ())
+            for layer_name in group.layer_names
+        }
+        actual = set(kv_caches)
+        if expected and actual != expected:
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            raise ValueError(f"KV cache layers do not match runtime config: missing={missing}, extra={extra}")
+        import torch
+        if any(not isinstance(tensor, torch.Tensor) for tensor in kv_caches.values()):
+            raise ValueError("vLLM KV caches must be torch tensors")
+        devices = {str(tensor.device) for tensor in kv_caches.values()}
         if len(devices) != 1 or not next(iter(devices)).startswith("cuda"):
             raise ValueError("KVStoreConnector requires one CUDA KV cache device")
-        dtypes = {str(t.dtype) for t in kv_caches.values()}
-        if dtypes != {"torch.bfloat16"}:
-            raise ValueError("Qwen2.5-0.5B connector requires bfloat16 KV cache")
-        first = next(iter(kv_caches.values()))
-        if first.ndim < 2 or first.shape[0] <= 0:
+        if {str(tensor.dtype) for tensor in kv_caches.values()} != {"torch.bfloat16"}:
+            raise ValueError("KVStoreConnector requires bfloat16 KV caches")
+        if any(tensor.ndim < 2 or any(size <= 0 for size in tensor.shape)
+               for tensor in kv_caches.values()):
             raise ValueError("invalid paged KV cache shape")
+        first = next(iter(kv_caches.values()))
         self._kv_caches = dict(kv_caches)
-        import torch
         self._load_stream = torch.cuda.Stream(device=first.device, priority=1)
         self._save_stream = torch.cuda.Stream(device=first.device, priority=1)
 
@@ -151,17 +169,30 @@ class KVStoreConnector(KVConnectorBase_V1):
                     matched = size
         request_id = str(getattr(request, "request_id", request))
         if self._transport is not None and hasattr(self._transport, "lookup"):
-            result = self._transport.lookup(request_id, tokens)
-            matched = int(result.get("hit_tokens", 0))
+            try:
+                result = self._transport.lookup(request_id, tokens)
+                matched = int(result.get("hit_tokens", 0))
+            except Exception:
+                matched = 0
         block_size = int(getattr(getattr(self._vllm_config, "cache_config", None),
                                  "block_size", 16))
         matched -= matched % block_size
         if matched > num_computed_tokens:
             generation = self._next_generation(request_id)
             self._load_plans[request_id] = _Load(
-                request_id, matched, (), generation
+                request_id, matched, (), generation, tokens[:matched]
             )
         return max(0, matched - num_computed_tokens), False
+
+    def on_new_request(self, request) -> None:
+        request_id = str(request.request_id)
+        tokens = tuple(int(x) for x in request.prompt_token_ids)
+        with self._lock:
+            generation = self._next_generation(request_id)
+            self._pending[request_id] = tokens
+            self._load[request_id] = _Save(tokens, {}, generation)
+            self._save_plans[request_id] = _Load(
+                request_id, len(tokens), (), generation, tokens)
 
     def start_load_kv(self, forward_context, **kwargs) -> None:
         del forward_context, kwargs
@@ -332,6 +363,8 @@ class KVStoreConnector(KVConnectorBase_V1):
                     self._put(save.key, save.payload)
                 except Exception as error:
                     errors[request_id] = error
+                    if self._transport is not None and hasattr(self._transport, "record_failure"):
+                        self._transport.record_failure("publish", error)
                     with self._lock:
                         self._saving.discard(request_id)
                     continue
@@ -350,11 +383,19 @@ class KVStoreConnector(KVConnectorBase_V1):
         request_id = str(getattr(request, "request_id", request))
         with self._lock:
             self._finished.add(request_id)
+            if str(self._role).lower().endswith("scheduler") and request_id in self._pending:
+                self._pending.pop(request_id, None)
+                self._load.pop(request_id, None)
+                self._load_plans.pop(request_id, None)
+                self._save_plans.pop(request_id, None)
+                return True, None
             raw_tokens = getattr(request, "prompt_token_ids", None)
             tokens = tuple(int(x) for x in raw_tokens) if raw_tokens is not None else self._pending.get(request_id, ())
-            generation = self._next_generation(request_id)
+            previous = self._load.get(request_id)
+            generation = previous.generation if previous is not None else self._next_generation(request_id)
+            payload = previous.payload if previous is not None else {}
             self._pending[request_id] = tokens
-            self._load[request_id] = _Save(tokens, {}, generation)
+            self._load[request_id] = _Save(tokens, payload, generation)
             self._load_plans[request_id] = _Load(
                 request_id, len(tokens), request_blocks, generation, tokens
             )
@@ -367,16 +408,22 @@ class KVStoreConnector(KVConnectorBase_V1):
                 raise ValueError("KVStoreConnector supports one KV cache group")
             block_ids = block_ids[0]
         physical = self._ids(block_ids)
+        request_id = str(getattr(request, "request_id", request))
+        tokens = tuple(int(x) for x in getattr(request, "prompt_token_ids", request))
+        with self._lock:
+            save = self._save_plans.get(request_id)
+            if save is not None:
+                self._save_plans[request_id] = _Load(
+                    request_id, len(tokens), physical, save.generation, tokens)
         if num_external_tokens > 0:
-            request_id = str(getattr(request, "request_id", request))
-            tokens = tuple(int(x) for x in getattr(request, "prompt_token_ids", request))
             with self._lock:
                 self._pending[request_id] = tokens[:num_external_tokens]
                 plan = self._load_plans.get(request_id)
                 generation = plan.generation if plan is not None else self._next_generation(request_id)
                 blocks_per_hit = max(1, (num_external_tokens + 15) // 16)
                 self._load_plans[request_id] = _Load(
-                    request_id, num_external_tokens, physical[:blocks_per_hit], generation
+                    request_id, num_external_tokens, physical[:blocks_per_hit], generation,
+                    tokens[:num_external_tokens]
                 )
 
     @contextmanager
@@ -392,12 +439,13 @@ class KVStoreConnector(KVConnectorBase_V1):
         with self._lock:
             loads = tuple(self._load_plans.values())
             saves = tuple(
-                _Load(request_id, len(tokens), self._load_plans[request_id].block_ids,
+                _Load(request_id, len(tokens), self._save_plans[request_id].block_ids,
                       self._load[request_id].generation, tuple(tokens))
                 for request_id, tokens in self._pending.items()
-                if request_id in self._load_plans and request_id in self._load
+                if request_id in self._save_plans and request_id in self._load
             )
             self._load_plans.clear()
+            self._save_plans.clear()
         return _Metadata(loads=loads, saves=saves)
 
     def build_connector_worker_meta(self):
@@ -449,6 +497,8 @@ class KVStoreConnector(KVConnectorBase_V1):
         self._transfers.clear()
         self._load_events.clear()
         self._kv_caches.clear()
+        if self._transport is not None and hasattr(self._transport, "close"):
+            self._transport.close()
 
     def bind_store(self, put: Callable[[tuple[int, ...], Any], None]) -> None:
         with self._lock:

@@ -12,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "python"))
 sys.path.insert(0, os.environ.get("KVSTORE_PYTHON_PROTO_DIR", str(Path(__file__).parents[2] / "build" / "python")))
-from kvstore_vllm.uds import SessionTransport
+from kvstore_vllm.uds import Session, SessionError, SessionTransport
+from kvstore_vllm import protocol as integration
 try:
     import kvstore_integration_v1_pb2 as pb
     _PROTOBUF_IMPORT_ERROR = ""
@@ -112,6 +113,38 @@ class LiveUdsBridgeTest(unittest.TestCase):
         self.exchange(first, req, pb.INVALID_ARGUMENT)
         first.close()
         self.negotiate(first, "reconnected")
+
+    def test_python_session_publication_lookup_and_reconnect(self):
+        """Exercise the real C++ Session, not a Python fake server."""
+        session = Session(self.path, tenant_id="tenant", model_id="test-model", timeout=2)
+        self.addCleanup(session.close)
+        payload = b"x" * 128
+        description = integration.TensorManifest(
+            version=1, tenant_id="tenant", model_id="test-model",
+            model_revision="rev", tokenizer_revision="tok",
+            cache_format="live", cache_format_version=1,
+            token_digest=integration.token_digest((1, 2, 3, 4)), token_count=4,
+            layer_count=1, dtype=1, shape=[2, 1, 4, 2, 4],
+            axis_order=[1, 2, 3, 5, 6], strides_bytes=[64, 64, 16, 8, 2],
+            layout=1, key_value_packing=1, block_tokens=0, device_kind=1,
+            tensor_parallel_size=1, pipeline_parallel_size=1,
+            payload_bytes=len(payload), chunk_bytes=128,
+            chunk_alignment_bytes=64, chunk_count=1,
+            payload_digest=__import__("hashlib").sha256(payload).digest(),
+        )
+        with self.assertRaises(SessionError) as missed:
+            session.lookup(description, (1, 2, 3, 4), exact=True)
+        self.assertEqual(missed.exception.response.status, integration.NOT_FOUND)
+        committed = session.publish(description, (payload,))
+        self.assertTrue(committed.lease_id)
+        session.release(committed.lease_id)
+        hit = session.lookup(description, (1, 2, 3, 4), exact=True)
+        self.assertEqual(hit.hit_tokens, 4)
+        self.assertEqual(session.get_chunks(hit), payload)
+        session.close()
+        reconnected = session.lookup(description, (1, 2, 3, 4), exact=True)
+        self.assertEqual(reconnected.hit_tokens, 4)
+        session.release(reconnected.lease_id)
 
     @staticmethod
     def frame(req):

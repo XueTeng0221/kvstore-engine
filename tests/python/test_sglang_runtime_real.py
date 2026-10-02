@@ -53,6 +53,18 @@ class SglangRuntimeTest(unittest.TestCase):
         storage.register_mem_host_pool_v2(pool, "kv")
         self.assertIs(storage.registered_pools["kv"], pool)
 
+    def test_v2_auxiliary_pool_hit_accounting(self):
+        from kvstore_sglang import KVStoreHiCacheStorage
+        storage = KVStoreHiCacheStorage(None, None)
+        storage.set("main-0", torch.tensor([1]))
+        storage.set("aux-0", torch.tensor([2]))
+        result = storage.batch_exists_v2(
+            ["main-0"],
+            [type("Transfer", (), {"name": "swa", "keys": ["aux-0"]})()],
+        )
+        self.assertEqual(result.kv_hit_pages, 1)
+        self.assertEqual(result.extra_pool_hit_pages, {"swa": 1})
+
     def test_v1_flat_indices_use_page_boundaries(self):
         from kvstore_sglang import KVStoreHiCacheStorage
         storage = KVStoreHiCacheStorage(None, None)

@@ -17,3 +17,29 @@ restart when the backing server has restored them.
 
 This is a framework-independent contract/mock path. It does not claim Python
 HiCacheStorage loading, radix insertion, CUDA DMA, or SGLang/GPU end-to-end tests.
+
+## Runtime validation boundary
+
+For a local Qwen2.5-0.5B smoke run, use the reproducible standard-library
+runner and enable hierarchical cache explicitly:
+
+```bash
+PATH="$PWD/.venv-sglang/bin:$PATH" PYTHONPATH=python \
+  .venv-sglang/bin/python tools/p8_framework_smoke.py \
+  --framework sglang --model "$PWD/artifacts/models/Qwen2.5-0.5B"
+
+HF_HUB_OFFLINE=1 VLLM_USE_FLASHINFER_SAMPLER=0 PYTHONPATH=python \
+  .venv-vllm/bin/python tools/p8_framework_smoke.py \
+  --framework vllm --model "$PWD/artifacts/models/Qwen2.5-0.5B"
+```
+
+This proves model loading, backend factory registration, host-pool attachment,
+and one framework request (`GET /model_info` plus `POST /generate` for SGLang;
+`GET /health` plus `POST /v1/completions` for vLLM) only.
+Set `uds_path` in `--hicache-storage-backend-extra-config` to use the P8.1
+Protobuf-over-UDS Session. In this mode the backend does not allocate the
+process-local `_pages` map: page reads and writes perform Session lookup,
+GET/RELEASE, RESERVE/PUT/COMMIT, and ABORT operations against the external
+KVStore. The standard-library smoke runner accepts `--uds-path` and passes this
+configuration to SGLang. Without `uds_path`, local mode remains available for
+framework startup diagnostics only.

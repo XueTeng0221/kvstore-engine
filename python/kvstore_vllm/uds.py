@@ -11,6 +11,9 @@ import socket
 import struct
 import threading
 import time
+import zlib
+
+from . import protocol as pb
 
 
 class SessionTransport:
@@ -22,6 +25,12 @@ class SessionTransport:
         self._state_lock = threading.Lock()
         self._exchange_lock = threading.Lock()
         self._cancelled = threading.Event()
+        self._generation = 0
+
+    @property
+    def generation(self) -> int:
+        with self._state_lock:
+            return self._generation
 
     def connect(self) -> None:
         if "\x00" in self.path:
@@ -41,6 +50,7 @@ class SessionTransport:
                 sock.close()
                 raise InterruptedError("transport cancelled")
             self._socket = sock
+            self._generation += 1
 
     def exchange(self, request: bytes, operation: int | None = None, *,
                  cancel: threading.Event | None = None,
@@ -52,6 +62,7 @@ class SessionTransport:
             self._cancelled.clear()
             self.connect()
             try:
+                self._check(cancel, limit)
                 if operation is None:
                     operation = request[1] if len(request) > 1 and request[0] == 8 else 0
                 if operation == 0:
@@ -127,3 +138,144 @@ class SessionTransport:
                 raise ConnectionError("UDS bridge closed")
             result.extend(chunk)
         return bytes(result)
+
+
+class SessionError(RuntimeError):
+    """A P8.1 response reported a non-OK status."""
+
+    def __init__(self, response: pb.Response):
+        self.response = response
+        super().__init__(response.message or f"integration status {response.status}")
+
+
+class Session:
+    """Typed P8.1 session over :class:`SessionTransport`."""
+
+    def __init__(self, path: str | None = None, *, tenant_id: str, model_id: str,
+                 timeout: float = 5.0, transport: SessionTransport | None = None):
+        if transport is None:
+            if path is None:
+                raise ValueError("path or transport is required")
+            transport = SessionTransport(path, timeout=timeout)
+        self.transport = transport
+        self.tenant_id = tenant_id
+        self.model_id = model_id
+        self._sequence = 0
+        self._negotiated_generation = -1
+        self._lock = threading.RLock()
+
+    def close(self) -> None:
+        self.transport.close()
+        self._negotiated_generation = -1
+
+    def cancel(self, request_id: str | None = None) -> None:
+        self.transport.cancel(request_id)
+        self._negotiated_generation = -1
+
+    def _trace(self) -> pb.TraceContext:
+        self._sequence += 1
+        return pb.TraceContext(
+            request_id=f"python-{self._sequence}", model_id=self.model_id,
+            tenant_id=self.tenant_id)
+
+    def _exchange(self, request: pb.Request, *, cancel=None, deadline=None,
+                  check=True) -> pb.Response:
+        request.trace = request.trace or self._trace()
+        response = pb.decode_response(self.transport.exchange(
+            pb.encode_request(request), request.operation, cancel=cancel, deadline=deadline))
+        if response.operation != request.operation:
+            raise ValueError("response operation mismatch")
+        if check and response.status != pb.OK:
+            raise SessionError(response)
+        return response
+
+    def negotiate(self, *, force=False) -> pb.Response:
+        with self._lock:
+            self.transport.connect()
+            if not force and self._negotiated_generation == self.transport.generation:
+                return pb.Response(operation=pb.NEGOTIATE, status=pb.OK)
+            response = self._exchange(pb.Request(
+                operation=pb.NEGOTIATE,
+                capabilities=pb.Capabilities(major=1, pinned_cpu=True)))
+            self._negotiated_generation = self.transport.generation
+            return response
+
+    def _call(self, request: pb.Request, *, cancel=None, deadline=None,
+              retry=False) -> pb.Response:
+        with self._lock:
+            for attempt in range(2 if retry else 1):
+                try:
+                    self.negotiate()
+                    return self._exchange(request, cancel=cancel, deadline=deadline)
+                except (TimeoutError, InterruptedError):
+                    self._negotiated_generation = -1
+                    raise
+                except (ConnectionError, BrokenPipeError, OSError):
+                    self._negotiated_generation = -1
+                    if attempt or not retry:
+                        raise
+            raise AssertionError("unreachable")
+
+    def lookup(self, manifest: pb.TensorManifest, token_ids, *, exact=False,
+               prefix_lengths=(), cancel=None, deadline=None) -> pb.Response:
+        deadline_ms = 0
+        if deadline is not None:
+            remaining = max(0.0, deadline - time.monotonic())
+            deadline_ms = int((time.time() + remaining) * 1000)
+        return self._call(pb.Request(
+            operation=pb.LOOKUP, manifest=manifest,
+            token_ids=[int(value) for value in token_ids],
+            prefix_lengths=[int(value) for value in prefix_lengths], exact=exact,
+            deadline_unix_ms=deadline_ms), cancel=cancel, deadline=deadline, retry=True)
+
+    def get(self, lease_id: int, chunk_index: int = 0, *, cancel=None,
+            deadline=None) -> bytes:
+        response = self._call(pb.Request(
+            operation=pb.GET, lease_id=lease_id, chunk_index=chunk_index),
+            cancel=cancel, deadline=deadline, retry=False)
+        if zlib.crc32(response.payload) & 0xffffffff != response.payload_checksum:
+            raise ValueError("GET payload checksum mismatch")
+        return response.payload
+
+    def release(self, lease_id: int) -> pb.Response:
+        return self._call(pb.Request(operation=pb.RELEASE, lease_id=lease_id))
+
+    def reserve(self, manifest: pb.TensorManifest) -> int:
+        return self._call(pb.Request(operation=pb.RESERVE, manifest=manifest)).reservation_id
+
+    def put(self, reservation_id: int, chunk_index: int, payload: bytes) -> pb.Response:
+        return self._call(pb.Request(
+            operation=pb.PUT, reservation_id=reservation_id, chunk_index=chunk_index,
+            payload=payload, payload_checksum=zlib.crc32(payload) & 0xffffffff))
+
+    def commit(self, reservation_id: int) -> pb.Response:
+        return self._call(pb.Request(operation=pb.COMMIT, reservation_id=reservation_id))
+
+    def abort(self, reservation_id: int) -> pb.Response:
+        return self._call(pb.Request(operation=pb.ABORT, reservation_id=reservation_id))
+
+    def publish(self, manifest: pb.TensorManifest, chunks) -> pb.Response:
+        reservation_id = self.reserve(manifest)
+        try:
+            for index, chunk in enumerate(chunks):
+                self.put(reservation_id, index, bytes(chunk))
+            return self.commit(reservation_id)
+        except BaseException:
+            try:
+                self.abort(reservation_id)
+            except BaseException:
+                pass
+            raise
+
+    def get_chunks(self, response: pb.Response, *, cancel=None,
+                   deadline=None) -> bytes:
+        try:
+            return b"".join(self.get(response.lease_id, index, cancel=cancel,
+                                     deadline=deadline)
+                            for index in response.chunk_indices)
+        finally:
+            if response.lease_id:
+                try:
+                    self.release(response.lease_id)
+                except (OSError, SessionError):
+                    pass

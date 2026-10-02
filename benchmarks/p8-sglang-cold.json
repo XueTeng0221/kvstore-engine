@@ -1,0 +1,91 @@
+{
+  "framework": "sglang",
+  "mode": "cold_miss",
+  "uds_path_configured": true,
+  "external_cache_required": true,
+  "runs": 10,
+  "warmup": 1,
+  "samples": [
+    {
+      "latency_ms": 289.76504877209663,
+      "ttft_ms": 237.92992159724236,
+      "tpot_ms": 7.405018167836325,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 0
+    },
+    {
+      "latency_ms": 122.55482003092766,
+      "ttft_ms": 33.50277617573738,
+      "tpot_ms": 12.721720550741468,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 125.56752189993858,
+      "ttft_ms": 36.278583109378815,
+      "tpot_ms": 12.755562684365682,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 122.34919890761375,
+      "ttft_ms": 36.00260615348816,
+      "tpot_ms": 12.335227536303657,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 123.6233301460743,
+      "ttft_ms": 35.96697002649307,
+      "tpot_ms": 12.522337159940175,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 125.61089172959328,
+      "ttft_ms": 36.19394078850746,
+      "tpot_ms": 12.773850134440831,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 124.09521266818047,
+      "ttft_ms": 36.12283244729042,
+      "tpot_ms": 12.567482888698578,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 123.49371984601021,
+      "ttft_ms": 35.97812354564667,
+      "tpot_ms": 12.502228042909078,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 125.74581429362297,
+      "ttft_ms": 35.50685942173004,
+      "tpot_ms": 12.891279267413276,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    },
+    {
+      "latency_ms": 123.7311102449894,
+      "ttft_ms": 35.866789519786835,
+      "tpot_ms": 12.55204581788608,
+      "input_tokens": 470,
+      "output_tokens": 8,
+      "cached_tokens": 1
+    }
+  ],
+  "profile_dir": "/root/autodl-tmp/kvstore-engine/benchmarks/p8-profiles/sglang-cold"
+}

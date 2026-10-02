@@ -61,6 +61,20 @@ class RuntimeAdapterTest(unittest.TestCase):
         connector.wait_for_save()
         self.assertEqual(len(calls), 1)
 
+    def test_request_finished_preserves_forward_save_payload(self):
+        from kvstore_vllm import KVStoreConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+        config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_producer=True))
+        connector = KVStoreConnector(config, KVConnectorRole.WORKER, None)
+        calls = []
+        connector.bind_store(lambda key, payload: calls.append((key, payload)))
+        request = SimpleNamespace(request_id="forward-first", prompt_token_ids=[7, 8])
+        connector.begin_save(request.request_id, request.prompt_token_ids)
+        connector.save_kv_layer_for_request(request.request_id, "layer", "value")
+        connector.request_finished(request, [1])
+        connector.wait_for_save()
+        self.assertEqual(calls, [((7, 8), {"layer": "value"})])
+
     def test_request_scope_routes_interleaved_layers(self):
         from kvstore_vllm import KVStoreConnector
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -122,8 +136,10 @@ class RuntimeAdapterTest(unittest.TestCase):
         scheduler = KVStoreConnector(config, KVConnectorRole.SCHEDULER, None)
         worker = KVStoreConnector(config, KVConnectorRole.WORKER, None)
         request = SimpleNamespace(request_id="framework", prompt_token_ids=list(range(16)))
-        self.assertTrue(scheduler.request_finished(request, [3])[0])
+        scheduler.on_new_request(request)
+        scheduler.update_state_after_alloc(request, [3], 0)
         metadata = scheduler.build_connector_meta(None)
+        self.assertTrue(scheduler.request_finished(request, [3])[0])
         worker.bind_connector_metadata(metadata)
         worker.start_load_kv(None)
         calls = []

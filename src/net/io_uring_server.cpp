@@ -66,7 +66,7 @@ class Ring final {
     if (::syscall(__NR_io_uring_register, fd_, IORING_REGISTER_PROBE, probe,
                   static_cast<unsigned>(kProbeCount)) < 0)
       return Fail("io_uring_register probe");
-    const auto supported = [&](io_uring_op operation) {
+    const auto supported = [&](std::uint8_t operation) {
       for (std::uint8_t index = 0; index < probe->ops_len; ++index) {
         const auto& entry = probe->ops[index];
         if (entry.op == static_cast<std::uint8_t>(operation))

@@ -1,0 +1,91 @@
+{
+  "framework": "vllm",
+  "mode": "memory_prefix_hit",
+  "uds_path_configured": true,
+  "external_cache_required": true,
+  "runs": 10,
+  "warmup": 1,
+  "samples": [
+    {
+      "latency_ms": 278.49938347935677,
+      "ttft_ms": 125.05517154932022,
+      "tpot_ms": 21.920601704290934,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 204.66481521725655,
+      "ttft_ms": 59.634581208229065,
+      "tpot_ms": 20.718604858432496,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 222.74796292185783,
+      "ttft_ms": 67.08648800849915,
+      "tpot_ms": 22.23735355905124,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 232.02881962060928,
+      "ttft_ms": 68.40438395738602,
+      "tpot_ms": 23.374919380460465,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 244.61856484413147,
+      "ttft_ms": 70.26993483304977,
+      "tpot_ms": 24.90694714444024,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 255.1455684006214,
+      "ttft_ms": 72.69768416881561,
+      "tpot_ms": 26.063983461686544,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 264.7421695291996,
+      "ttft_ms": 71.70716300606728,
+      "tpot_ms": 27.576429503304617,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 272.8110961616039,
+      "ttft_ms": 79.01477441191673,
+      "tpot_ms": 27.685188821383885,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 288.14348950982094,
+      "ttft_ms": 82.25768804550171,
+      "tpot_ms": 29.412257352045604,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    },
+    {
+      "latency_ms": 290.445514023304,
+      "ttft_ms": 81.43205940723419,
+      "tpot_ms": 29.859064945152827,
+      "input_tokens": 475,
+      "output_tokens": 8,
+      "cached_tokens": null
+    }
+  ],
+  "profile_dir": "/root/autodl-tmp/kvstore-engine/benchmarks/p8-profiles/vllm-prefix"
+}

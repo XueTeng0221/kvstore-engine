@@ -22,6 +22,7 @@ endfunction()
 option(KVSTORE_BUILD_TESTS "Build tests" ON)
 option(KVSTORE_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(KVSTORE_BUILD_FUZZERS "Build libFuzzer protocol targets" OFF)
+option(KVSTORE_BUILD_GPU_TESTS "Register framework GPU runtime tests" OFF)
 option(KVSTORE_ENABLE_NTYCO "Build the pinned third-party NtyCo runtime" ON)
 option(KVSTORE_ACCEPT_NTYCO_RESTRICTED_LICENSE
        "Acknowledge NtyCo upstream has no permissive license" OFF)
@@ -264,6 +265,11 @@ if(KVSTORE_BUILD_TESTS)
     -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/python -p test_uds_transport.py -v)
   set_tests_properties(UdsTransport PROPERTIES TIMEOUT 20)
   add_test(NAME IntegrationMockClient COMMAND kvstore_mock_client)
+  if(KVSTORE_BUILD_GPU_TESTS)
+    add_test(NAME VllmGpuRuntime COMMAND ${Python3_EXECUTABLE} -m unittest discover
+      -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/python -p test_vllm_gpu_runtime.py -v)
+    set_tests_properties(VllmGpuRuntime PROPERTIES TIMEOUT 120)
+  endif()
 
   add_executable(kvstore_unit_tests
     tests/unit/common_test.cpp
