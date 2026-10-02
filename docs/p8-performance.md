@@ -1,7 +1,11 @@
 # P8 Framework Performance
 
-The reproducible raw request samples are `benchmarks/p8-*.json`; each sample
-records `uds_path_configured=true` and `external_cache_required=true`. Real PyTorch
+The reproducible raw request samples are `benchmarks/p8-*.json`; external-run
+samples record `uds_path_configured=true` and `external_cache_required=true`
+(the intentionally local `p8-vllm-hit.json` baseline records false), plus a
+`provenance` object containing the git revision, host, framework version, runner
+argv, model path/file metadata and UDS configuration. External samples include
+the UDS path; local baselines explicitly record that no UDS was configured. Real PyTorch
 profiler traces are under `benchmarks/p8-profiles/`, and the machine-readable
 summary is `benchmarks/p8-summary.json`. The run used Qwen2.5-0.5B revision
 `060db6499f32faf8b98477b0a26969ef7d8b9987`, one RTX 5090 (32,607 MiB), driver
@@ -31,11 +35,15 @@ disk-hit artifact is `benchmarks/p8-vllm-external-disk.json` and its raw audit
 records are `benchmarks/p8-vllm-external-disk.external.jsonl`: all ten measured
 requests reported `disk_hit=true`, 114,032,640 disk bytes, and 119,771,740 UDS
 bytes in aggregate. Its mean/p50/p95/p99 latency was 652.737/586.668/1035.623/
-1309.322 ms, QPS 1.532, and process CPU 26.96%. The disk row has no profiler
-trace, so profiler FLOPs savings are intentionally null rather than inferred.
+1309.322 ms, QPS 1.532, and process CPU 26.96%. The disk row is associated with
+the stored `p8-profiles/vllm-disk` traces: 2 trace files, 10.324 ms GPU activity
+per request and 114,816,450,560 GEMM FLOPs, yielding 96.66% FLOPs savings versus
+the vLLM cold baseline. Missing profiler counters remain null rather than
+inferred.
 
 SGLang currently produces publication records but no stock prefetch read in the
-same disk workload; therefore no SGLang disk-hit row is claimed. The stock
+same disk workload; a real ten-run `disk_hit` probe failed closed with zero
+external audit records. Therefore no SGLang disk-hit row is claimed. The stock
 0.5.19 cancellation bridge now forwards `PrefetchOperation.is_terminated` as a
 real callback, but a framework disk-read trace still requires a workload that
 causes the stock prefetch queue to evict/reload pages. Existing SGLang rows

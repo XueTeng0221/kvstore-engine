@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import signal
 import re
 import socket
@@ -16,6 +18,8 @@ import queue
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
+from importlib import metadata
 from pathlib import Path
 
 
@@ -130,6 +134,75 @@ def child_cpu_seconds(pid: int) -> float | None:
         return (int(fields[13]) + int(fields[14])) / ticks
     except (OSError, ValueError, IndexError):
         return None
+
+
+def package_version(name: str) -> str | None:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def provenance(framework: str, model: str, command: list[str], uds_path: str | None) -> dict:
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        revision = None
+    try:
+        diff = subprocess.check_output(["git", "diff", "--binary"])
+        diff_sha256 = hashlib.sha256(diff).hexdigest()
+    except (OSError, subprocess.CalledProcessError):
+        diff_sha256 = None
+    try:
+        tree = subprocess.check_output(["git", "diff", "HEAD", "--binary"])
+        status = subprocess.check_output(["git", "status", "--porcelain=v1"])
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard"], text=True)
+        untracked_content = bytearray()
+        for name in untracked.splitlines():
+            path = Path(name)
+            if path.is_file():
+                untracked_content.extend(name.encode() + b"\0")
+                untracked_content.extend(path.read_bytes())
+        tree_fingerprint = hashlib.sha256(
+            tree + status + bytes(untracked_content)).hexdigest()
+        worktree_dirty = bool(status.strip())
+    except (OSError, subprocess.CalledProcessError):
+        tree_fingerprint = None
+        worktree_dirty = None
+    model_path = Path(model).resolve()
+    model_files = []
+    model_sha256 = None
+    path = model_path / "model.safetensors"
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+        model_sha256 = digest.hexdigest()
+        model_files.append({"name": path.name, "bytes": path.stat().st_size,
+                            "sha256": model_sha256})
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git_revision": revision,
+        "git_worktree_dirty": worktree_dirty,
+        "git_diff_sha256": diff_sha256,
+        "git_tree_fingerprint": tree_fingerprint,
+        "host": platform.node(),
+        "platform": platform.platform(),
+        "python": sys.version.split()[0],
+        "framework": framework,
+        "framework_version": package_version("vllm" if framework == "vllm" else "sglang"),
+        "model": Path(model).name,
+        "model_revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+        "model_safetensors_sha256": model_sha256,
+        "model_path": str(model_path),
+        "model_files": model_files,
+        "command": command,
+        "command_type": "argv",
+        "uds_path": str(Path(uds_path).resolve()) if uds_path else None,
+    }
 
 
 def main() -> int:
@@ -355,7 +428,19 @@ def main() -> int:
                   "runs": args.runs, "warmup": args.warmup, "samples": rows,
                   "uds_path_configured": bool(args.uds_path),
                   "external_cache_required": bool(args.uds_path),
-                   "profile_dir": str(args.profile_dir.resolve()) if args.profile_dir else None}
+                  "profile_dir": str(args.profile_dir.resolve()) if args.profile_dir else None,
+                  "provenance": provenance(args.framework, model, command, args.uds_path)}
+        result["provenance"]["runner_command"] = [
+            sys.executable, str(Path(__file__).resolve()),
+            "--framework", args.framework, "--model", model,
+            "--mode", args.mode, "--runs", str(args.runs),
+            "--warmup", str(args.warmup),
+            *("--uds-path", str(Path(args.uds_path).resolve())
+              if args.uds_path else ()),
+            *("--profile-dir", str(args.profile_dir.resolve())
+              if args.profile_dir else ()),
+            *("--output", str(args.output.resolve()) if args.output else ()),
+        ]
         latencies = [row["latency_ms"] for row in rows]
         ordered = sorted(latencies)
         result["latency_ms_mean"] = statistics.fmean(latencies)

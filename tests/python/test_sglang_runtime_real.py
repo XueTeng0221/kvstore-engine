@@ -2,6 +2,7 @@ import sys
 import unittest
 import json
 import tempfile
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -149,6 +150,42 @@ class SglangRuntimeTest(unittest.TestCase):
         terminated["value"] = True
         self.assertTrue(info.extra_info["cancelled"]())
         self.assertTrue(info.extra_info["cancel_event"].is_set())
+
+    def test_stock_prefetch_queue_path_delivers_cancellation_to_backend(self):
+        from kvstore_sglang import KVStoreHiCacheStorage
+        import kvstore_sglang.hicache as adapter
+        from sglang.srt.managers import cache_controller
+        from sglang.srt.managers.cache_controller import (
+            HiCacheController, PrefetchOperation)
+
+        KVStoreHiCacheStorage(None, None)
+        operation = PrefetchOperation("request-1", [1, 2])
+        operation.hash_value = ["page-1"]
+        operation.host_indices = torch.tensor([0])
+        operation.prefix_keys = []
+        controller = object.__new__(HiCacheController)
+        controller.page_size = 1
+        controller.prefetch_sync_queue = queue.Queue()
+        observed = {}
+
+        def page_get(_operation, _keys, _indices, extra_info):
+            observed["cancelled"] = extra_info.extra_info["cancelled"]
+            observed["event"] = extra_info.extra_info["cancel_event"]
+            operation.mark_terminate()
+            return 0
+
+        controller.page_get_func = page_get
+        adapter._install_stock_cancellation_bridge()
+        self.assertEqual(controller._page_transfer(operation), 0)
+        self.assertTrue(observed["cancelled"]())
+        self.assertTrue(observed["event"].is_set())
+
+        installed = cache_controller.HiCacheController._page_transfer
+        adapter._install_stock_cancellation_bridge()
+        self.assertIs(cache_controller.HiCacheController._page_transfer, installed)
+        adapter._restore_stock_cancellation_bridge()
+        self.assertIsNot(cache_controller.HiCacheController._page_transfer, installed)
+        adapter._install_stock_cancellation_bridge()
 
     def test_audit_publish_uses_bounded_append(self):
         from kvstore_sglang import KVStoreHiCacheStorage

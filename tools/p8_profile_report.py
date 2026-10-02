@@ -53,6 +53,13 @@ def profile(path: Path):
     return files, gpu_us / 1000.0, flops or None
 
 
+def profile_path(benchmarks: Path, framework: str, suffix: str) -> Path:
+    # The disk run predates the common suffix naming and is stored as vllm-disk.
+    if suffix == "external-disk":
+        return benchmarks / "p8-profiles" / f"{framework}-disk"
+    return benchmarks / "p8-profiles" / f"{framework}-{suffix}"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--benchmarks", type=Path, default=Path("benchmarks"))
@@ -73,7 +80,7 @@ def main():
             tpot = [sample["tpot_ms"] for sample in samples
                     if sample.get("tpot_ms") is not None]
             trace_files, gpu_ms, flops = profile(
-                args.benchmarks / "p8-profiles" / f"{framework}-{suffix}")
+                profile_path(args.benchmarks, framework, suffix))
             cached = [sample["cached_tokens"] for sample in samples
                       if sample.get("cached_tokens") is not None]
             inputs = [sample["input_tokens"] for sample in samples
@@ -88,7 +95,8 @@ def main():
                 hit_tokens = 0.0
                 hit_source = "workload_unique_prompt"
             rows.append({
-                "framework": framework, "mode": mode, "runs": len(samples),
+                 "artifact": raw_path.name,
+                 "framework": framework, "mode": mode, "runs": len(samples),
                 "mean_ms": statistics.fmean(latencies),
                 "p50_ms": percentile(latencies, .50),
                 "p95_ms": percentile(latencies, .95),
@@ -104,9 +112,10 @@ def main():
                 "profiler_flops": flops, "trace_files": trace_files,
                 "disk_bytes": raw.get("disk_bytes"),
                 "network_bytes": raw.get("network_bytes"),
-                "cpu_percent": raw.get("cpu_percent"),
-                "disk_hit": raw.get("disk_hit", False),
-            })
+                 "cpu_percent": raw.get("cpu_percent"),
+                 "disk_hit": raw.get("disk_hit", False),
+                 "provenance": raw.get("provenance"),
+             })
     for framework in ("vllm", "sglang"):
         cold = next(row for row in rows if row["framework"] == framework and
                     row["mode"] == "cold_miss")
@@ -126,12 +135,20 @@ def main():
             row["recompute_avoidance_percent"] = (
                 row["hit_tokens"] / row["input_tokens"] * 100
                 if row["hit_tokens"] is not None and row["input_tokens"] else None)
+    artifact_provenance = {}
+    for raw_path in sorted(args.benchmarks.glob("p8-*.json")):
+        if raw_path.name == args.output.name:
+            continue
+        raw = json.loads(raw_path.read_text())
+        if raw.get("provenance"):
+            artifact_provenance[raw_path.name] = raw["provenance"]
     result = {"environment": {
-        "date": "2026-09-29", "gpu": "NVIDIA GeForce RTX 5090 32607 MiB",
+        "date": "mixed; see row provenance", "gpu": "NVIDIA GeForce RTX 5090 32607 MiB",
         "driver": "580.76.05", "cuda": "13.0", "model": "Qwen2.5-0.5B",
         "model_revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
         "vllm": "0.29.0", "sglang": "0.5.19", "concurrency": 1,
         "output_tokens": 8,
+        "artifact_provenance": artifact_provenance,
     }, "rows": rows}
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"output": str(args.output), "rows": len(rows)}))

@@ -52,6 +52,7 @@ class _CallableEvent:
 _stock_cancellation = contextvars.ContextVar("kvstore_sglang_stock_cancellation", default=None)
 _stock_bridge_installed = False
 _stock_bridge_lock = threading.Lock()
+_stock_bridge_originals = []
 
 
 def _install_stock_cancellation_bridge():
@@ -78,6 +79,7 @@ def _install_stock_cancellation_bridge_locked():
     except ImportError:
         return
     original_info = cache_controller.HiCacheStorageExtraInfo
+    hybrid_original_info = hybrid_controller.HiCacheStorageExtraInfo
 
     class BoundExtraInfo(original_info):
         def __init__(self, prefix_keys=None, extra_info=None):
@@ -90,27 +92,56 @@ def _install_stock_cancellation_bridge_locked():
 
     cache_controller.HiCacheStorageExtraInfo = BoundExtraInfo
     hybrid_controller.HiCacheStorageExtraInfo = BoundExtraInfo
+    _stock_bridge_originals.extend([
+        (cache_controller, "HiCacheStorageExtraInfo", original_info),
+        (hybrid_controller, "HiCacheStorageExtraInfo", hybrid_original_info),
+    ])
 
     def wrap(method):
+        if getattr(method, "_kvstore_stock_cancellation", False):
+            return method
         def guarded(self, operation, *args, **kwargs):
             token = _stock_cancellation.set(operation.is_terminated)
             try:
                 return method(self, operation, *args, **kwargs)
             finally:
                 _stock_cancellation.reset(token)
+        guarded._kvstore_stock_cancellation = True
+        guarded._kvstore_stock_original = method
         return guarded
 
-    cache_controller.HiCacheController._page_transfer = wrap(
-        cache_controller.HiCacheController._page_transfer)
-    cache_controller.HiCacheController._storage_hit_query = wrap(
-        cache_controller.HiCacheController._storage_hit_query)
+    for owner, name in ((cache_controller.HiCacheController, "_page_transfer"),
+                        (cache_controller.HiCacheController, "_storage_hit_query")):
+        original = getattr(owner, name)
+        wrapped = wrap(original)
+        if wrapped is not original:
+            _stock_bridge_originals.append((owner, name, original))
+            setattr(owner, name, wrapped)
     if hasattr(hybrid_controller.HybridCacheController, "_page_transfer"):
-        hybrid_controller.HybridCacheController._page_transfer = wrap(
-            hybrid_controller.HybridCacheController._page_transfer)
+        owner, name = hybrid_controller.HybridCacheController, "_page_transfer"
+        original = getattr(owner, name)
+        wrapped = wrap(original)
+        if wrapped is not original:
+            _stock_bridge_originals.append((owner, name, original))
+            setattr(owner, name, wrapped)
     if hasattr(hybrid_controller.HybridCacheController, "_storage_hit_query"):
-        hybrid_controller.HybridCacheController._storage_hit_query = wrap(
-            hybrid_controller.HybridCacheController._storage_hit_query)
+        owner, name = hybrid_controller.HybridCacheController, "_storage_hit_query"
+        original = getattr(owner, name)
+        wrapped = wrap(original)
+        if wrapped is not original:
+            _stock_bridge_originals.append((owner, name, original))
+            setattr(owner, name, wrapped)
     _stock_bridge_installed = True
+
+
+def _restore_stock_cancellation_bridge():
+    """Restore stock SGLang classes for tests or an embedding process shutdown."""
+    global _stock_bridge_installed
+    with _stock_bridge_lock:
+        for owner, name, original in reversed(_stock_bridge_originals):
+            setattr(owner, name, original)
+        _stock_bridge_originals.clear()
+        _stock_bridge_installed = False
 
 
 class KVStoreHiCacheStorage(HiCacheStorage):

@@ -2450,6 +2450,167 @@ Changed files: python/kvstore_vllm/uds.py; python/kvstore_sglang/hicache.py; too
 Commands: pending focused rerun and independent Agent B round 37.
 Test result: pending.
 
+Round 43 remediation update (2026-10-02): Agent A added a deterministic regression
+through the installed stock SGLang `PrefetchOperation` and `_page_transfer` queue
+path, proving the termination predicate reaches the backend's real
+`HiCacheStorageExtraInfo` callback and event. The smoke runner now records git,
+host, framework, model-file, command and UDS provenance; historical P8 raw
+artifacts were normalized to that schema. The profile report maps the existing
+`vllm-disk` trace directory and reports its actual profiler counters instead of
+zero. A real SGLang disk probe with the disk-enabled UDS fixture failed closed
+because the stock workload produced zero external audit records; no disk-hit
+claim was added.
+Changed files: tests/python/test_sglang_runtime_real.py; tools/p8_framework_smoke.py;
+tools/p8_profile_report.py; docs/p8-performance.md; benchmarks/p8-*.json;
+benchmarks/p8-summary.json; todolist/todolist.md.
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py tools/p8_profile_report.py python/kvstore_sglang/hicache.py tests/python/test_sglang_runtime_real.py`; `cmake --build build --target kvstore_uds_bridge_fixture -j2`; disk-enabled fixture `./build/kvstore_uds_bridge_fixture /tmp/p8-sglang-disk.sock default Qwen2.5-0.5B disk /tmp/p8-sglang-disk-tier` plus `PYTHONPATH=python .venv-sglang/bin/python tools/p8_framework_smoke.py --framework sglang --model "$PWD/artifacts/models/Qwen2.5-0.5B" --uds-path /tmp/p8-sglang-disk.sock --mode disk_hit --runs 10 --warmup 1 --output /tmp/p8-sglang-disk.json`; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `git diff --check`.
+Test result: SGLang runtime 9/9; fixture build passed; real SGLang disk probe failed closed with no audit records; report JSON validation passed; vLLM disk summary now has 2 profiler traces, 10.324 ms/request GPU activity and 114816450560 profiler FLOPs; historical artifacts carry provenance metadata.
+Residual risks: P8.3 full-framework cancellation request remains unverified despite stock queue-path proof; P8.4 SGLang disk-hit/profiler evidence remains unavailable because the stock workload does not issue prefetch reads. Owner Agent A; independent Agent B round 43 required.
+
+Audit round: 43
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of stock queue cancellation, provenance schema, disk trace accounting and fail-closed SGLang probe
+Commands: pending
+Residual risks: pending independent audit; P8.3/P8.4 remain [~]
+
+Audit round: 46
+Auditor: Agent B
+Verdict: fail
+Findings: high `tools/p8_profile_report.py:69-75` omitted external cold/full raw
+artifacts from summary provenance; medium round claim overpromised complete
+runner argv for local no-UDS baseline; low tree fingerprint did not include
+untracked file contents. Full-framework cancellation and SGLang disk risks were
+honestly retained.
+Commands: SGLang 9/9; py_compile; ten raw plus summary JSON validation; profile
+regeneration comparison; provenance/hash/tree probes; git diff --check.
+Residual risks: fixed in round 47 remediation; full-framework SGLang cancellation
+and SGLang disk read remain intentionally unverified.
+
+Round 47 remediation update (2026-10-02): Agent A preserves provenance for every
+raw `p8-*.json` artifact by filename, including external cold/full artifacts;
+runner documentation now distinguishes local no-UDS baselines from external
+runs; and tree fingerprinting includes untracked file contents as well as names,
+status and `git diff HEAD`.
+Changed files: tools/p8_framework_smoke.py; tools/p8_profile_report.py;
+docs/p8-performance.md; benchmarks/p8-summary.json; todolist/todolist.md.
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py tools/p8_profile_report.py python/kvstore_sglang/hicache.py tests/python/test_sglang_runtime_real.py`; all ten P8 JSON validations; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `git diff --check`.
+Test result: SGLang 9/9; all JSON valid; summary retains ten artifact provenance entries and seven metric rows; report regenerated; diff check passed.
+Residual risks: P8.3 full-framework cancellation request and P8.4 SGLang disk-hit/profiler matrix remain unverified. Owner Agent A; independent Agent B round 47 required.
+
+Audit round: 47
+Auditor: Agent B
+Verdict: pass-with-risk
+Findings: none blocking. Summary retains all nine raw benchmark artifacts plus
+the summary's own provenance view; fresh model SHA, runner argv, tree fingerprint,
+stock cancellation restore/idempotence and report regeneration passed.
+Commands: SGLang 9/9; py_compile; all raw/summary JSON validation; fresh model
+SHA and argv probes; summary regeneration byte comparison; stock cancellation
+install/restore/idempotence probe; git diff --check.
+Residual risks: P8.3 full-framework SGLang cancellation request remains
+unverified; P8.4 SGLang disk-hit/profiler evidence remains unavailable because
+the stock workload issues no prefetch read. Checked-in historical artifacts have
+null fresh tree fingerprints because they predate this capture; Owner Agent A.
+
+Audit round: 45
+Auditor: Agent B
+Verdict: fail
+Findings: high fresh provenance left model SHA fields null and defined dirty state
+from unstaged diff truthiness; medium summary keyed only by framework/mode dropped
+external cold/full artifacts; medium provenance commands omitted runner wrapper
+arguments. Findings at tools/p8_framework_smoke.py:164-172,
+tools/p8_profile_report.py:137-140 and benchmark provenance records.
+Commands: SGLang 9/9; py_compile; all P8 JSON validation; profile regeneration
+comparison; git diff --check; provenance key/hash/tree probes.
+Residual risks: fixed in round 46 remediation; full-framework SGLang cancellation
+and SGLang disk read remain intentionally unverified.
+
+Round 46 remediation update (2026-10-02): Agent A computes the model safetensors
+SHA-256 during fresh runs, derives dirty state from status rather than hash
+truthiness, and includes staged/unstaged tree fingerprinting. Summary provenance
+now keys every raw artifact by filename, preserving external cold/full rows, and
+each artifact carries a complete runner argv including model, UDS, profile and
+output arguments.
+Changed files: tools/p8_framework_smoke.py; tools/p8_profile_report.py;
+benchmarks/p8-*.json; benchmarks/p8-summary.json; todolist/todolist.md.
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py tools/p8_profile_report.py python/kvstore_sglang/hicache.py tests/python/test_sglang_runtime_real.py`; `for f in benchmarks/p8-vllm-cold.json benchmarks/p8-vllm-prefix.json benchmarks/p8-vllm-hit.json benchmarks/p8-vllm-external-cold.json benchmarks/p8-vllm-external-full.json benchmarks/p8-vllm-external-disk.json benchmarks/p8-sglang-cold.json benchmarks/p8-sglang-prefix.json benchmarks/p8-sglang-hit.json benchmarks/p8-summary.json; do python3 -m json.tool "$f" >/dev/null || exit 1; done`; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `git diff --check`.
+Test result: SGLang 9/9; all ten P8 JSON artifacts valid; report regenerated with seven metric rows and ten per-artifact provenance entries; diff check passed.
+Residual risks: P8.3 full-framework cancellation request and P8.4 SGLang disk-hit/profiler matrix remain unverified. Owner Agent A; independent Agent B round 46 required.
+
+Audit round: 46
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of model hash, artifact retention and runner provenance
+Commands: pending
+Residual risks: pending independent audit; P8.3/P8.4 remain [~]
+
+Audit round: 44
+Auditor: Agent B
+Verdict: fail
+Findings: high generated and historical provenance still differed in framework,
+command type and model hash fields; dirty-state capture excluded staged/untracked
+identity. Medium recorded commands were not fully executable; low restore behavior
+had no automated assertion. Findings at tools/p8_framework_smoke.py:146-178,
+benchmarks/p8-sglang-cold.json:6-21, todolist/todolist.md:2466 and
+tests/python/test_sglang_runtime_real.py:154-180.
+Commands: SGLang 9/9; py_compile; ten P8 JSON validations; profile regeneration;
+git diff --check; independent lifecycle/provenance probes.
+Residual risks: fixed in round 45 remediation; full-framework SGLang cancellation
+and SGLang disk read remain intentionally unverified.
+
+Round 45 remediation update (2026-10-02): Agent A added common `framework`,
+`command_type`, model hash and tree fingerprint fields to generated and historical
+provenance; tree fingerprint includes staged diff plus status identity. The stock
+cancellation regression now asserts idempotent installation and restore/reinstall.
+The exact disk fixture and smoke arguments are recorded in the command log.
+Changed files: tools/p8_framework_smoke.py; tests/python/test_sglang_runtime_real.py;
+benchmarks/p8-*.json; benchmarks/p8-summary.json; todolist/todolist.md.
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py tools/p8_profile_report.py python/kvstore_sglang/hicache.py tests/python/test_sglang_runtime_real.py`; `python3 -m json.tool benchmarks/p8-summary.json`; `for f in benchmarks/p8-vllm-cold.json benchmarks/p8-vllm-prefix.json benchmarks/p8-vllm-hit.json benchmarks/p8-vllm-external-cold.json benchmarks/p8-vllm-external-full.json benchmarks/p8-vllm-external-disk.json benchmarks/p8-sglang-cold.json benchmarks/p8-sglang-prefix.json benchmarks/p8-sglang-hit.json; do python3 -m json.tool "$f" >/dev/null || exit 1; done`; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `git diff --check`.
+Test result: SGLang 9/9; all ten raw artifacts and summary valid; report regenerated; diff check passed.
+Residual risks: P8.3 full-framework cancellation request and P8.4 SGLang disk-hit/profiler matrix remain unverified. Owner Agent A; independent Agent B round 45 required.
+
+Audit round: 45
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of provenance unification and restore regression
+Commands: pending
+Residual risks: pending independent audit; P8.3/P8.4 remain [~]
+
+Audit round: 43
+Auditor: Agent B
+Verdict: fail
+Findings: high provenance fields in new and historical artifacts used different
+schemas and omitted dirty-worktree identity; medium docs overclaimed UDS fields;
+medium summary collapsed mixed artifact provenance into one environment; medium
+stock monkey-patch had no restore/idempotent lifecycle; low disk probe command
+was incomplete. Findings at tools/p8_framework_smoke.py:145-170,
+tools/p8_profile_report.py:137-145, python/kvstore_sglang/hicache.py:52-113,
+tests/python/test_sglang_runtime_real.py:154-180.
+Commands: focused SGLang 9/9; JSON validation for all P8 raw/summary artifacts;
+profile regeneration; diff check; independent source audit.
+Residual risks: fixed in round 44 remediation; full-framework SGLang cancellation
+and SGLang disk hit remain intentionally unverified.
+
+Round 44 remediation update (2026-10-02): Agent A unified generated and historical
+provenance fields, added dirty-tree and diff hash capture, changed summary
+provenance to per-artifact entries with mixed-date labeling, corrected the local
+baseline documentation, and made the stock cancellation bridge idempotent with
+an explicit restore hook. The known full-framework cancellation and absent
+SGLang disk read remain accurately documented as residual risks.
+Changed files: tools/p8_framework_smoke.py; tools/p8_profile_report.py;
+python/kvstore_sglang/hicache.py; benchmarks/p8-*.json; benchmarks/p8-summary.json;
+docs/p8-performance.md; todolist/todolist.md.
+Commands: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python .venv-sglang/bin/python -m unittest tests.python.test_sglang_runtime_real -v`; `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile tools/p8_framework_smoke.py tools/p8_profile_report.py python/kvstore_sglang/hicache.py tests/python/test_sglang_runtime_real.py`; `python3 -m json.tool benchmarks/p8-summary.json`; `for f in benchmarks/p8-vllm-cold.json benchmarks/p8-vllm-prefix.json benchmarks/p8-vllm-hit.json benchmarks/p8-vllm-external-cold.json benchmarks/p8-vllm-external-full.json benchmarks/p8-vllm-external-disk.json benchmarks/p8-sglang-cold.json benchmarks/p8-sglang-prefix.json benchmarks/p8-sglang-hit.json; do python3 -m json.tool "$f" >/dev/null || exit 1; done`; `python3 tools/p8_profile_report.py --output benchmarks/p8-summary.json`; `git diff --check`.
+Test result: SGLang 9/9; all P8 JSON valid; summary regenerated with per-artifact provenance and vLLM disk profiler counters; diff check passed.
+Residual risks: P8.3 full-framework cancellation request and P8.4 SGLang disk-hit/profiler matrix remain unverified. Owner Agent A; independent Agent B round 44 required.
+
+Audit round: 44
+Auditor: Agent B
+Verdict: pending
+Findings: pending independent audit of remediation
+Commands: pending
+Residual risks: pending independent audit; P8.3/P8.4 remain [~]
+
 Round 39 remediation update (2026-10-02): Agent A connected the stock SGLang
 0.5.19 controller termination predicate to `HiCacheStorageExtraInfo` through a
 one-time adapter bridge. The callback is `PrefetchOperation.is_terminated`, not
